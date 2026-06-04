@@ -1,7 +1,7 @@
 ---
-title: "Running SQL with sqlite3_exec"
+title: "Execute SQL Statements Using the sqlite3_exec Function"
 sidebarTitle: "sqlite3_exec"
-description: "Execute one or more SQL statements with sqlite3_exec, handle results via callback, free error messages, and understand when to prefer prepared statements instead."
+description: "Run SQL with sqlite3_exec, collect row results via callback, free error strings with sqlite3_free, and know when to prefer prepared statements instead."
 ---
 
 `sqlite3_exec()` is a convenience wrapper that compiles, runs, and finalizes one or more semicolon-separated SQL statements in a single call. It is the fastest way to execute fire-and-forget DDL or DML — creating tables, inserting seed data, running migrations — where you do not need to bind parameters or read typed column values. For any query that runs more than once, accepts user-supplied parameters, or needs to read column data with its native type, you should use prepared statements instead.

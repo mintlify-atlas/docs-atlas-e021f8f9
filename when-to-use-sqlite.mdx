@@ -1,7 +1,7 @@
 ---
 title: "When to Use SQLite vs. Client-Server Databases"
 sidebarTitle: "When to Use"
-description: "A practical guide to choosing between SQLite and client-server databases like PostgreSQL or MySQL, with real-world scenarios, trade-offs, and a comparison table."
+description: "A practical guide to choosing between SQLite and client-server databases, covering real-world scenarios, trade-offs, and a side-by-side comparison table."
 ---
 
 Picking the right database is an architectural decision with long-term consequences. SQLite and client-server databases such as PostgreSQL and MySQL are not competing products — they solve different problems, and the best choice depends entirely on how your application reads and writes data, how many concurrent users you expect, and how the software is distributed. The single most useful question to ask is: **does the database serve many concurrent clients over a network, or does it serve one application on one machine?** If the answer is the former, a client-server database is likely the right tool. If the latter, SQLite almost certainly is.

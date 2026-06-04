@@ -79,7 +79,7 @@ These macros activate optional subsystems that are compiled out by default to ke
 |--------|:-------:|-------------|
 | `SQLITE_ENABLE_FTS5` | Off | Enables the **FTS5** full-text search engine. FTS5 is the current generation full-text search extension, replacing the older FTS3/FTS4. Source lives in `ext/fts5/`. |
 | `SQLITE_ENABLE_RTREE` | Off | Enables the **R*Tree** virtual table for spatial indexing. Required for geographic and bounding-box queries. Source lives in `ext/rtree/`. |
-| `SQLITE_ENABLE_JSON1` | Off | Enables the **JSON1** extension, providing `json()`, `json_object()`, `json_extract()`, and related SQL functions for working with JSON data. |
+| `SQLITE_ENABLE_GEOPOLY` | Off | Enables the **Geopoly** virtual table, an alternative interface to the R*Tree module for geometric (polygon-based) queries. Implicitly enables `SQLITE_ENABLE_RTREE`. |
 | `SQLITE_ENABLE_COLUMN_METADATA` | Off | Enables the `sqlite3_column_database_name()`, `sqlite3_column_table_name()`, and `sqlite3_column_origin_name()` APIs, which return the source database, table, and column for each result-set column. |
 | `SQLITE_ENABLE_STAT4` | Off | Enables collection of histogram data on index columns during `ANALYZE`. Improves query planner accuracy for skewed data distributions at the cost of more space in the `sqlite_stat4` table. |
 | `SQLITE_ENABLE_NORMALIZE` | Off | Enables the `sqlite3_normalized_sql()` API, which returns a canonical form of a prepared statement's SQL text with literal values replaced by `?` parameters. |
@@ -98,6 +98,7 @@ The `--enable-all` flag to `./configure` (Unix) enables all of the above options
 | Option | Default | Description |
 |--------|:-------:|-------------|
 | `SQLITE_OMIT_DEPRECATED` | Off (deprecated APIs present) | Removes deprecated API functions and constants from the build. Using deprecated identifiers will cause a compile error. Useful for ensuring code does not rely on obsolete interfaces. |
+| `SQLITE_OMIT_JSON` | Off (JSON enabled) | Removes JSON SQL functions (`json()`, `json_object()`, `json_extract()`, etc.) and JSON virtual tables from the build. JSON support is compiled in by default since SQLite 3.38.0; use this macro to exclude it in size-constrained environments. |
 | `SQLITE_OMIT_LOAD_EXTENSION` | Off (load_extension enabled) | Removes run-time loadable extension support (`sqlite3_load_extension()` and the `load_extension()` SQL function). Reduces attack surface in security-sensitive deployments. Automatically set when `SQLITE_OMIT_FLOATING_POINT` is defined. |
 | `SQLITE_OMIT_AUTOINIT` | Off (auto-init enabled) | Removes the automatic call to `sqlite3_initialize()` that normally happens the first time any SQLite API is used. When this macro is defined, the application must call `sqlite3_initialize()` explicitly before using any other SQLite interface. |
 

@@ -1,5 +1,5 @@
 ---
-title: "Get Started with SQLite in C"
+title: "SQLite in C: Quickstart Guide for Embedding the Database"
 sidebarTitle: "Quickstart"
 description: "Learn to embed SQLite in a C application using the amalgamation: open a database, create tables, insert rows, query results, and handle errors end-to-end."
 ---
@@ -115,7 +115,7 @@ int main(void) {
     sqlite3_bind_text(stmt, 1, "Alice", -1, SQLITE_STATIC);
     sqlite3_bind_double(stmt, 2, 98.5);
     sqlite3_step(stmt);
-    sqlite3_reset(stmt);   /* reset bindings position, keep statement alive */
+    sqlite3_reset(stmt);   /* reset execution state; bindings are preserved */
 
     /* Bind and execute for the second row */
     sqlite3_bind_text(stmt, 1, "Bob", -1, SQLITE_STATIC);
@@ -241,7 +241,7 @@ Execute the statement with `sqlite3_step()`. For non-SELECT statements it return
 
 ```c
 sqlite3_step(stmt);      /* SQLITE_DONE for INSERT/UPDATE/DELETE */
-sqlite3_reset(stmt);     /* ready for re-use with new bindings */
+sqlite3_reset(stmt);     /* ready for re-use; rebind or reuse existing bindings */
 /* ... bind and step again ... */
 sqlite3_finalize(stmt);  /* destroy the prepared statement */
 ```

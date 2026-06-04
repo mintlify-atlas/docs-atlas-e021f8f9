@@ -1,5 +1,5 @@
 ---
-title: "JSON Functions and the JSONB Format in SQLite"
+title: "SQLite JSON Functions and JSONB Binary Format Guide"
 sidebarTitle: "JSON Support"
 description: "Reference for all SQLite JSON functions: json_extract, ->, ->>, json_each, json_set, JSONB binary format, and real-world query patterns for JSON data."
 ---
@@ -124,7 +124,7 @@ Wraps a SQL value as a properly escaped JSON value.
 SELECT json_quote('hello');    -- '"hello"'
 SELECT json_quote(42);         -- '42'
 SELECT json_quote(NULL);       -- 'null'
-SELECT json_quote(X'ff00');    -- '"\/\/AA=="'   (base64-encoded blob)
+-- Note: passing a plain BLOB raises "JSON cannot hold BLOB values".
 ```
 
 ### json_array_length()

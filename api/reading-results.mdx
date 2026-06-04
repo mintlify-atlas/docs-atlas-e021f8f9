@@ -126,8 +126,10 @@ When you call an accessor whose type differs from the stored type, SQLite applie
 | `NULL` | `BLOB` | `NULL` pointer |
 | `INTEGER` | `FLOAT` | Convert integer → float |
 | `INTEGER` | `TEXT` | ASCII rendering of the integer |
+| `INTEGER` | `BLOB` | Same as `INTEGER`→`TEXT` |
 | `FLOAT` | `INTEGER` | `CAST` to integer |
 | `FLOAT` | `TEXT` | ASCII rendering of the float |
+| `FLOAT` | `BLOB` | `CAST` to BLOB |
 | `TEXT` | `INTEGER` | `CAST` to integer |
 | `TEXT` | `FLOAT` | `CAST` to real |
 | `TEXT` | `BLOB` | No change |

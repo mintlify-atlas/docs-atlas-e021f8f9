@@ -279,7 +279,7 @@ int query_users(sqlite3 *db, int min_age) {
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         printf("  id=%-4lld  name=%-20s  age=%d\n",
                (long long)sqlite3_column_int64(stmt, 0),
-               sqlite3_column_text(stmt, 1),
+               (const char *)sqlite3_column_text(stmt, 1),
                sqlite3_column_int(stmt, 2));
     }
 

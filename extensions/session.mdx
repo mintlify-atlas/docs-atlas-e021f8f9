@@ -1,7 +1,7 @@
 ---
 title: "Session Extension: Track and Replay Database Changes"
 sidebarTitle: "Session"
-description: "Record INSERT, UPDATE, and DELETE operations as binary changesets with the Session extension, then apply, invert, or rebase them for sync and undo/redo workflows."
+description: "Record INSERT, UPDATE, and DELETE changes as binary changesets with SQLite's Session extension, then apply, invert, or rebase them for sync and undo/redo."
 ---
 
 The Session extension captures every INSERT, UPDATE, and DELETE made to a set of tables and encodes them into a compact binary format called a **changeset** (or **patchset**). A changeset can be transmitted to another database, applied to bring it up to date, inverted to undo changes, or rebased to resolve conflicts between concurrent edits. Common use cases include database synchronisation, undo/redo stacks, and audit logging.

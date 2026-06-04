@@ -1,5 +1,5 @@
 ---
-title: "SQLite SQL Syntax: SELECT, INSERT, UPDATE, DELETE"
+title: "SQLite Core SQL Syntax: SELECT, INSERT, UPDATE, DELETE"
 sidebarTitle: "Core Syntax"
 description: "Complete reference for SQLite's core SQL statements: CREATE TABLE, SELECT, INSERT, UPDATE, DELETE, CTEs, JOINs, UPSERT, and SQLite-specific extensions."
 ---
@@ -251,7 +251,7 @@ DELETE FROM users;
 
 ## RETURNING Clause
 
-Both `INSERT`, `UPDATE`, and `DELETE` support a `RETURNING` clause (SQLite 3.35.0+):
+`INSERT`, `UPDATE`, and `DELETE` all support a `RETURNING` clause (SQLite 3.35.0+):
 
 ```sql
 INSERT INTO users (name, email)

@@ -1,7 +1,7 @@
 ---
-title: "SQLite C API: Architecture and Core Objects"
+title: "SQLite C API: Architecture, Objects, and Threading"
 sidebarTitle: "Introduction"
-description: "Overview of the SQLite C API architecture, core objects, threading modes, version constants, and object lifecycle for building database-driven applications."
+description: "Overview of the SQLite C API: core objects, threading modes, version constants, and object lifecycle for building database-driven applications."
 ---
 
 The SQLite C API is the primary interface through which applications interact with an SQLite database. Defined in `sqlite3.h` — a file generated from the source template `src/sqlite.h.in` during the build process — it exposes a rich set of functions, types, and constants that together cover everything from opening a connection to defining custom SQL functions. Because the entire API surface lives in a single header and a single amalgamation source file (`sqlite3.c`), integrating SQLite into any C or C++ project is straightforward.

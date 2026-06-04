@@ -1,7 +1,7 @@
 ---
-title: "SQLite in the Browser via WebAssembly (WASM)"
+title: "SQLite WebAssembly (WASM): Run SQLite in the Browser"
 sidebarTitle: "WASM"
-description: "Run SQLite in browsers and Node.js with the official WebAssembly build: npm install, in-memory and OPFS persistent databases, the OO1 API, and build requirements."
+description: "Run SQLite in browsers and Node.js with the official WASM build: install via npm, query in-memory or OPFS persistent databases using the OO1 API."
 ---
 
 The SQLite WASM build compiles the entire SQLite C library to WebAssembly using the [Emscripten](https://emscripten.org) toolchain, making it possible to run a full-featured SQLite database engine directly in a web browser or in Node.js — with no native binaries, no server round-trips, and no plugins required. The WASM sources live in `ext/wasm/` and the official distribution is published to npm as `@sqlite.org/sqlite-wasm`.

@@ -1,7 +1,7 @@
 ---
 title: "Configuring SQLite with sqlite3_config and sqlite3_db_config"
 sidebarTitle: "Configuration"
-description: "Configure SQLite globally with sqlite3_config and per-connection with sqlite3_db_config, including threading, memory, logging, busy handling, and interrupt."
+description: "Configure SQLite globally with sqlite3_config and per-connection with sqlite3_db_config: threading, memory, logging, busy handling, and interrupt."
 ---
 
 SQLite provides two configuration interfaces: `sqlite3_config()` for global library-wide settings that affect every connection, and `sqlite3_db_config()` for per-connection settings that tune behavior on a single `sqlite3` handle. Global configuration must generally be applied before the library is initialized; per-connection configuration can be changed at any time. Understanding which knob lives at which level is essential for building correct, performant SQLite applications.

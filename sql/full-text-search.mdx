@@ -1,5 +1,5 @@
 ---
-title: "Full-Text Search with FTS5 in SQLite"
+title: "Full-Text Search in SQLite with the FTS5 Extension"
 sidebarTitle: "Full-Text Search"
 description: "Build full-text search into SQLite using FTS5 virtual tables: tokenizers, MATCH queries, bm25/highlight/snippet functions, external content, and fts5vocab."
 ---
@@ -58,9 +58,10 @@ Controls how text is broken into tokens. Built-in tokenizers:
 
 | Tokenizer | Description |
 |---|---|
-| `unicode61` (default) | Unicode 6.1 word-boundary tokeniser, case-folding |
+| `unicode61` (default) | Unicode 6.1 word-boundary tokenizer, case-folding |
 | `ascii` | ASCII-only, ignores non-ASCII bytes |
-| `porter` | Porter stemmer (wraps another tokenizer) |
+| `porter` | Porter stemmer (wraps another tokenizer, defaults to `unicode61`) |
+| `trigram` | Breaks text into overlapping 3-character trigrams; enables `LIKE`/`GLOB` index support |
 
 ```sql
 CREATE VIRTUAL TABLE docs USING fts5(
@@ -289,7 +290,7 @@ FTS5 supports special administrative commands delivered as `INSERT` statements t
 -- Rebuild the entire FTS index from the content table
 INSERT INTO docs(docs) VALUES('rebuild');
 
--- Optimise the index (merge all segments into one)
+-- Optimize the index (merge all segments into one)
 INSERT INTO docs(docs) VALUES('optimize');
 
 -- Delete a specific rowid from a contentless table

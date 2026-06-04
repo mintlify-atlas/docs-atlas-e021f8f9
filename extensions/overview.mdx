@@ -1,7 +1,7 @@
 ---
-title: "SQLite Extensions: Loadable and Built-In Modules"
+title: "SQLite Extensions Overview: Loadable and Built-In Modules"
 sidebarTitle: "Overview"
-description: "A complete guide to SQLite extensions: loading shared libraries at runtime, auto-registering built-in modules, and the ext/misc one-file utility extensions."
+description: "A complete guide to SQLite extensions: loading shared libraries at runtime, auto-registering built-in modules, and the ext/misc utility extensions."
 ---
 
 SQLite's extension system lets you add custom SQL functions, virtual tables, and collations without modifying the SQLite core. Extensions range from small single-file utilities bundled in `ext/misc` to heavyweight built-in modules like FTS5, R-Tree, and the Session extension. Understanding how extensions are discovered, loaded, and registered is the first step toward using or building them.
@@ -144,7 +144,6 @@ The `ext/misc` directory in the SQLite source tree contains a collection of smal
   | File | Description |
   |---|---|
   | `csv.c` | Virtual table for reading CSV files directly with SQL |
-  | `json1.c` | JSON functions (already in the amalgamation) |
   | `series.c` | `generate_series()` virtual table (template for new virtual tables) |
   | `shathree.c` | `sha3()` and `sha3_query()` SQL functions |
   | `rot13.c` | `rot13()` substitution function (good starter template for custom functions) |
@@ -152,7 +151,7 @@ The `ext/misc` directory in the SQLite source tree contains a collection of smal
   | `zipfile.c` | Virtual table for reading and writing ZIP archives |
   | `decimal.c` | Arbitrary-precision decimal arithmetic functions |
   | `completion.c` | Tab-completion support for the CLI |
-  | `carray.c` | Bind a C array as a table-valued function |
+  | `regexp.c` | Regular expression matching via the `regexp()` SQL function |
 </Accordion>
 
 To compile `csv.c` as a loadable shared library on Linux:

@@ -135,18 +135,18 @@ SQLite's Unix build system uses [autosetup](https://msteveb.github.io/autosetup/
   </Step>
 </Steps>
 
-## Fallback: Makefile.linux-gcc
+## Fallback: Makefile.linux-generic
 
-If `./configure` does not work in your environment, the source tree includes a generic makefile named **`Makefile.linux-gcc`** in the top-level directory. Copy it to a new name and edit it to match your platform — the comments inside describe exactly which variables need to be changed.
+If `./configure` does not work in your environment, the source tree includes a generic makefile named **`Makefile.linux-generic`** in the top-level directory. Copy it to a new name and edit it to match your platform — the comments inside describe exactly which variables need to be changed.
 
 ```bash
-cp ../sqlite/Makefile.linux-gcc ./Makefile
+cp ../sqlite/Makefile.linux-generic ./Makefile
 # Edit the Makefile to set TCLDIR, CC, and other variables
 make sqlite3
 ```
 
 <Warning>
-`Makefile.linux-gcc` is a last resort. The `./configure` script is actively maintained and handles a much wider range of platform quirks automatically.
+`Makefile.linux-generic` is a last resort. The `./configure` script is actively maintained and handles a much wider range of platform quirks automatically.
 </Warning>
 
 ## Key Make Targets Reference

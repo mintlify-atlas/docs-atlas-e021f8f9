@@ -1,5 +1,5 @@
 ---
-title: "Opening and Closing SQLite Database Connections"
+title: "Opening and Closing SQLite Database Connections Guide"
 sidebarTitle: "Open / Close"
 description: "Learn how to open, configure, and close SQLite database connections using sqlite3_open, sqlite3_open_v2, sqlite3_close, and related functions."
 ---
@@ -77,18 +77,20 @@ int sqlite3_open_v2(
     |------|-------|---------|
     | `SQLITE_OPEN_READONLY` | `0x00000001` | Open in read-only mode. Returns an error if the file does not exist. |
     | `SQLITE_OPEN_READWRITE` | `0x00000002` | Open for reading and writing. Falls back to read-only if OS permissions prevent writing. Database must already exist. |
+    | `SQLITE_OPEN_CREATE` | `0x00000004` | Create the database file if it does not exist. Must be combined with `SQLITE_OPEN_READWRITE`. |
     | `SQLITE_OPEN_READWRITE \| SQLITE_OPEN_CREATE` | — | Open for reading and writing, creating the file if necessary. This is the behavior of `sqlite3_open()`. |
   </Tab>
   <Tab title="Optional Modifiers">
-    | Flag | Meaning |
-    |------|---------|
-    | `SQLITE_OPEN_URI` | Interpret the filename as a [URI filename](https://www.sqlite.org/uri.html). |
-    | `SQLITE_OPEN_MEMORY` | Open an in-memory database. The filename is used only for cache-sharing purposes when shared cache mode is enabled. |
-    | `SQLITE_OPEN_NOMUTEX` | Use multi-thread threading mode (separate threads, separate connections). |
-    | `SQLITE_OPEN_FULLMUTEX` | Use serialized threading mode (multiple threads, one connection). |
-    | `SQLITE_OPEN_SHAREDCACHE` | Enable shared cache mode for this connection. |
-    | `SQLITE_OPEN_PRIVATECACHE` | Disable shared cache mode for this connection. |
-    | `SQLITE_OPEN_NOFOLLOW` | Do not follow symbolic links. |
+    | Flag | Value | Meaning |
+    |------|-------|---------|
+    | `SQLITE_OPEN_URI` | `0x00000040` | Interpret the filename as a [URI filename](https://www.sqlite.org/uri.html). |
+    | `SQLITE_OPEN_MEMORY` | `0x00000080` | Open an in-memory database. The filename is used only for cache-sharing purposes when shared cache mode is enabled. |
+    | `SQLITE_OPEN_NOMUTEX` | `0x00008000` | Use multi-thread threading mode (separate threads, separate connections). |
+    | `SQLITE_OPEN_FULLMUTEX` | `0x00010000` | Use serialized threading mode (multiple threads, one connection). |
+    | `SQLITE_OPEN_SHAREDCACHE` | `0x00020000` | Enable shared cache mode for this connection. |
+    | `SQLITE_OPEN_PRIVATECACHE` | `0x00040000` | Disable shared cache mode for this connection. |
+    | `SQLITE_OPEN_NOFOLLOW` | `0x01000000` | Do not follow symbolic links. |
+    | `SQLITE_OPEN_EXRESCODE` | `0x02000000` | Enable extended result codes for this connection from the moment it is opened, without a separate call to `sqlite3_extended_result_codes()`. |
   </Tab>
 </Tabs>
 

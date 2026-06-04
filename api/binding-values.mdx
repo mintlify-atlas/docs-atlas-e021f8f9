@@ -1,7 +1,7 @@
 ---
-title: "Binding Parameters to SQLite Prepared Statements"
+title: "Binding Values to SQLite Prepared Statement Parameters"
 sidebarTitle: "Binding Values"
-description: "Bind typed values to prepared statement parameters using sqlite3_bind_int, bind_text, bind_blob, and friends, with SQLITE_STATIC and SQLITE_TRANSIENT semantics."
+description: "Bind typed C values to SQLite statement parameters using sqlite3_bind_int, bind_text, and bind_blob, with SQLITE_STATIC and SQLITE_TRANSIENT explained."
 ---
 
 Parameter binding is the secure and efficient way to pass values into a prepared statement. Instead of constructing SQL strings with embedded literals — a practice that invites SQL injection and forces type conversions — you place placeholders in your SQL text and then bind typed C values to them before calling `sqlite3_step()`. SQLite preserves the type information through the entire query plan, enabling proper index usage and avoiding unnecessary text conversions.
@@ -190,8 +190,8 @@ The `destructor` parameter of text and BLOB binding functions controls the lifet
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `SQLITE_STATIC` | `(void*)0` | The data is static or will outlive the statement. SQLite uses the pointer directly without copying and calls no destructor. |
-| `SQLITE_TRANSIENT` | `(void*)-1` | SQLite immediately makes a private copy of the data. Safe to use with any buffer. Incurs a memory allocation. |
+| `SQLITE_STATIC` | `((sqlite3_destructor_type)0)` | The data is static or will outlive the statement. SQLite uses the pointer directly without copying and calls no destructor. |
+| `SQLITE_TRANSIENT` | `((sqlite3_destructor_type)-1)` | SQLite immediately makes a private copy of the data. Safe to use with any buffer. Incurs a memory allocation. |
 | Custom function pointer | Any `void(*)(void*)` | SQLite calls this function with the data pointer as its argument when the binding is replaced or the statement is finalized. Use this to hand ownership of a heap allocation to SQLite. |
 
 <Tip>

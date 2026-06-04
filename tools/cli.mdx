@@ -1,5 +1,5 @@
 ---
-title: "The SQLite Command-Line Shell (sqlite3)"
+title: "SQLite Command-Line Shell: Complete sqlite3 Reference"
 sidebarTitle: "CLI Shell"
 description: "A comprehensive reference for the sqlite3 command-line shell: opening databases, running SQL, and every dot-command grouped by category."
 ---
@@ -298,6 +298,7 @@ Set the output display mode.
 | `list` | Values separated by the configured separator (default `\|`) |
 | `markdown` | Markdown pipe-table format |
 | `quote` | SQL literal quoting |
+| `table` | MySQL-style table formatting |
 | `tabs` | Tab-separated values |
 | `tcl` | TCL list format |
 
@@ -445,6 +446,19 @@ Display the output of the next command in a spreadsheet application.
 
 ```sql
 sqlite> .excel
+sqlite> SELECT * FROM notes;
+```
+
+### `.www`
+
+Display the output of the next command in a web browser (rendered as HTML). Pass `--plain` to show results as plain text instead.
+
+```text
+.www ?--plain?
+```
+
+```sql
+sqlite> .www
 sqlite> SELECT * FROM notes;
 ```
 
@@ -653,7 +667,10 @@ Manage SQL archive files (requires `SQLITE_HAVE_ZLIB`).
 | `-x` / `--extract` | Extract files from archive |
 | `-v` / `--verbose` | Print each filename as it is processed |
 | `-f FILE` / `--file FILE` | Use archive FILE (default: current db) |
+| `-a FILE` / `--append FILE` | Open FILE using the apndvfs VFS |
 | `-C DIR` / `--directory DIR` | Read/extract files from directory DIR |
+| `-g` / `--glob` | Use glob matching for names in archive |
+| `-n` / `--dryrun` | Show the SQL that would have occurred |
 
 ```sql
 sqlite> .ar -cf archive.sqlar foo.txt bar.txt
