@@ -1,0 +1,191 @@
+---
+title: "Online Database Backup with the SQLite Backup API"
+sidebarTitle: "Backup API"
+description: "Copy a live SQLite database—on disk or in memory—to another file without blocking readers or writers, using sqlite3_backup_init, step, and finish."
+---
+
+Traditional file-copy approaches to SQLite backup are unreliable when other processes or threads are writing to the database at the same time — you risk copying a file mid-transaction and ending up with a corrupt copy. The SQLite Online Backup API solves this problem by operating at the page level through the normal database engine. The source database stays fully readable and writable throughout; the API simply grabs a short shared lock per batch of pages rather than holding a lock for the entire duration.
+
+## How the Backup API Works
+
+A backup operation involves three stages:
+
+1. **Initialize** — `sqlite3_backup_init()` creates a backup object and opens an exclusive write transaction on the destination.
+2. **Step** — `sqlite3_backup_step()` copies pages from source to destination in configurable batches. Call it in a loop, sleeping between calls to let writers through.
+3. **Finish** — `sqlite3_backup_finish()` releases all resources. If the copy was incomplete, it rolls back any partial write on the destination.
+
+## `sqlite3_backup_init`
+
+```c
+sqlite3_backup *sqlite3_backup_init(
+  sqlite3 *pDest,
+  const char *zDestName,
+  sqlite3 *pSource,
+  const char *zSourceName
+);
+```
+
+<ParamField path="pDest" type="sqlite3*" required>
+  Destination database connection. Must be different from `pSource`. The caller must not use this connection for anything else between `sqlite3_backup_init()` and `sqlite3_backup_finish()`.
+</ParamField>
+
+<ParamField path="zDestName" type="const char*" required>
+  Destination schema name: `"main"`, `"temp"`, or an attached database name.
+</ParamField>
+
+<ParamField path="pSource" type="sqlite3*" required>
+  Source database connection. May continue to be used by the application and by other threads while the backup is in progress.
+</ParamField>
+
+<ParamField path="zSourceName" type="const char*" required>
+  Source schema name: `"main"`, `"temp"`, or an attached database name.
+</ParamField>
+
+Returns a pointer to an `sqlite3_backup` object on success, or `NULL` on failure. On failure, error details are stored on `pDest` and retrievable via `sqlite3_errcode(pDest)` and `sqlite3_errmsg(pDest)`. Common failure reasons: the destination already has an open read or write transaction, or source and destination are the same connection.
+
+## `sqlite3_backup_step`
+
+```c
+int sqlite3_backup_step(sqlite3_backup *p, int nPage);
+```
+
+<ParamField path="p" type="sqlite3_backup*" required>
+  The backup object returned by `sqlite3_backup_init()`.
+</ParamField>
+
+<ParamField path="nPage" type="int" required>
+  Number of pages to copy in this call. Pass `-1` to copy all remaining pages in a single call (useful for quick in-memory copies).
+</ParamField>
+
+<ResponseField name="SQLITE_OK" type="int">
+  Pages were copied successfully and more pages remain.
+</ResponseField>
+
+<ResponseField name="SQLITE_DONE" type="int">
+  All pages have been copied. The backup is complete.
+</ResponseField>
+
+<ResponseField name="SQLITE_BUSY" type="int">
+  A required lock on the source could not be obtained (busy handler was invoked and returned 0). The call may be retried.
+</ResponseField>
+
+<ResponseField name="SQLITE_LOCKED" type="int">
+  The source database connection is currently being used to write to the source. Retrying later is safe.
+</ResponseField>
+
+<ResponseField name="SQLITE_READONLY / SQLITE_NOMEM / SQLITE_IOERR_*" type="int">
+  Fatal error. Pass the backup object to `sqlite3_backup_finish()` to release resources; retrying is pointless.
+</ResponseField>
+
+<Note>
+  If the source database is modified by a **different** connection between calls to `sqlite3_backup_step()`, the backup automatically restarts from page 1 on the next call. If it is modified by the **same** connection performing the backup, the destination is updated in sync.
+</Note>
+
+## `sqlite3_backup_finish`
+
+```c
+int sqlite3_backup_finish(sqlite3_backup *p);
+```
+
+Frees all resources associated with the backup object. If `sqlite3_backup_step()` has not yet returned `SQLITE_DONE`, any partial write on the destination is rolled back. The `sqlite3_backup` pointer is invalid after this call.
+
+Returns `SQLITE_OK` if no step error occurred during the lifetime of the backup object. Returns the error code from the most recent failed `sqlite3_backup_step()` otherwise. `SQLITE_BUSY` and `SQLITE_LOCKED` returns from `step()` are not considered permanent errors and do not affect the finish return value.
+
+## Progress Monitoring
+
+```c
+int sqlite3_backup_remaining(sqlite3_backup *p);
+int sqlite3_backup_pagecount(sqlite3_backup *p);
+```
+
+Both values are updated after each call to `sqlite3_backup_step()`:
+
+- `sqlite3_backup_remaining()` — pages yet to be copied.
+- `sqlite3_backup_pagecount()` — total pages in the source at the end of the last step.
+
+<Warning>
+  These two functions are not individually thread-safe. Reading them while another thread is calling `sqlite3_backup_step()` on the same object may produce stale or inconsistent values.
+</Warning>
+
+## Online Backup Pattern (Step-by-Step Loop)
+
+For backing up a large live database without starving writers, copy in small batches and yield briefly between batches:
+
+```c
+#include <unistd.h>   /* usleep */
+#include "sqlite3.h"
+
+/*
+** Copies pSrc into the file at zDestFile.
+** Returns SQLITE_OK on success.
+*/
+int backup_database(sqlite3 *pSrc, const char *zDestFile) {
+    sqlite3 *pDest = NULL;
+    sqlite3_backup *pBackup = NULL;
+    int rc;
+
+    rc = sqlite3_open(zDestFile, &pDest);
+    if (rc != SQLITE_OK) goto done;
+
+    pBackup = sqlite3_backup_init(pDest, "main", pSrc, "main");
+    if (!pBackup) {
+        rc = sqlite3_errcode(pDest);
+        fprintf(stderr, "backup_init: %s\n", sqlite3_errmsg(pDest));
+        goto done;
+    }
+
+    do {
+        rc = sqlite3_backup_step(pBackup, 100 /* pages per step */);
+
+        int remaining  = sqlite3_backup_remaining(pBackup);
+        int total      = sqlite3_backup_pagecount(pBackup);
+        if (total > 0)
+            printf("Progress: %d/%d pages (%.1f%%)\n",
+                   total - remaining, total,
+                   100.0 * (total - remaining) / total);
+
+        if (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED) {
+            usleep(250 * 1000); /* 250 ms — let writers through */
+        }
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+
+done:
+    if (pBackup) {
+        int finish_rc = sqlite3_backup_finish(pBackup);
+        if (rc == SQLITE_DONE) rc = finish_rc;
+    }
+    if (pDest) sqlite3_close(pDest);
+    return (rc == SQLITE_DONE) ? SQLITE_OK : rc;
+}
+```
+
+## Copying Between Disk and In-Memory Databases
+
+The backup API works transparently across database types. To **load** a file into memory:
+
+```c
+/* pMem was opened with sqlite3_open(":memory:", &pMem) */
+sqlite3_backup *b = sqlite3_backup_init(pMem, "main", pFile, "main");
+sqlite3_backup_step(b, -1);   /* -1 = copy everything at once */
+sqlite3_backup_finish(b);
+```
+
+To **persist** an in-memory database to disk, reverse source and destination.
+
+<Tip>
+  The source and destination page sizes must match when using WAL-mode destinations or in-memory destinations. If they differ, `sqlite3_backup_step()` returns `SQLITE_READONLY`.
+</Tip>
+
+## Using `.backup` in the SQLite CLI
+
+The SQLite command-line shell exposes the backup API through the `.backup` dot-command:
+
+```bash
+# Back up the currently open database to a file
+sqlite3 source.db ".backup 'backup.db'"
+
+# Back up a specific attached schema
+sqlite3 source.db ".backup aux backup_aux.db"
+```
+
+Under the hood, the shell calls `sqlite3_backup_init()`, steps with a large `nPage`, and calls `sqlite3_backup_finish()`.

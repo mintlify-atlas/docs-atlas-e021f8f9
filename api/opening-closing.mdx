@@ -1,0 +1,227 @@
+---
+title: "Opening and Closing SQLite Database Connections"
+sidebarTitle: "Open / Close"
+description: "Learn how to open, configure, and close SQLite database connections using sqlite3_open, sqlite3_open_v2, sqlite3_close, and related functions."
+---
+
+Every interaction with an SQLite database begins by obtaining a `sqlite3` database connection handle and ends by releasing it. The C API provides three open functions — `sqlite3_open`, `sqlite3_open16`, and `sqlite3_open_v2` — along with two close functions, `sqlite3_close` and `sqlite3_close_v2`, each with distinct behaviors around error handling and resource cleanup. Understanding the differences between them is critical for writing robust, leak-free C code.
+
+## Opening a Database
+
+### sqlite3_open — Simple UTF-8 Open
+
+The simplest way to open a database is `sqlite3_open`. It accepts a UTF-8 filename and always attempts to create the database if it does not exist.
+
+```c
+int sqlite3_open(
+  const char *filename,   /* Database filename (UTF-8) */
+  sqlite3 **ppDb          /* OUT: SQLite db handle */
+);
+```
+
+<ParamField path="filename" type="const char *" required>
+  Path to the database file encoded as UTF-8. Pass `":memory:"` to create a private in-memory database, or `""` (empty string) to create a temporary on-disk database that is deleted when the connection closes.
+</ParamField>
+
+<ParamField path="ppDb" type="sqlite3 **" required>
+  Output pointer that receives the new database connection handle. Even if an error occurs, `*ppDb` is usually set to a non-NULL value — always call `sqlite3_close()` on it to release resources.
+</ParamField>
+
+<Warning>
+  Always check the return code. A non-`SQLITE_OK` return does **not** mean `*ppDb` is NULL — SQLite may have partially constructed the connection. You must still close it with `sqlite3_close()` to avoid a resource leak.
+</Warning>
+
+### sqlite3_open16 — UTF-16 Filename
+
+```c
+int sqlite3_open16(
+  const void *filename,   /* Database filename (UTF-16) */
+  sqlite3 **ppDb          /* OUT: SQLite db handle */
+);
+```
+
+`sqlite3_open16` behaves identically to `sqlite3_open` except that the filename is interpreted as UTF-16 in the native byte order of the host platform. Databases created with this function use UTF-16 as the default text encoding.
+
+### sqlite3_open_v2 — Full Control
+
+```c
+int sqlite3_open_v2(
+  const char *filename,   /* Database filename (UTF-8) */
+  sqlite3 **ppDb,         /* OUT: SQLite db handle */
+  int flags,              /* Flags */
+  const char *zVfs        /* Name of VFS module to use */
+);
+```
+
+<ParamField path="filename" type="const char *" required>
+  Path to the database file (UTF-8). Supports URI filenames when `SQLITE_OPEN_URI` is set or URI handling is globally enabled.
+</ParamField>
+
+<ParamField path="ppDb" type="sqlite3 **" required>
+  Output pointer receiving the connection handle.
+</ParamField>
+
+<ParamField path="flags" type="int" required>
+  Bitmask controlling how the database is opened. Must include at least one of the access-mode flags listed below.
+</ParamField>
+
+<ParamField path="zVfs" type="const char *">
+  Name of the VFS (Virtual File System) module to use. Pass `NULL` to use the default VFS.
+</ParamField>
+
+## Open Flags
+
+<Tabs>
+  <Tab title="Access Mode (required)">
+    | Flag | Value | Meaning |
+    |------|-------|---------|
+    | `SQLITE_OPEN_READONLY` | `0x00000001` | Open in read-only mode. Returns an error if the file does not exist. |
+    | `SQLITE_OPEN_READWRITE` | `0x00000002` | Open for reading and writing. Falls back to read-only if OS permissions prevent writing. Database must already exist. |
+    | `SQLITE_OPEN_READWRITE \| SQLITE_OPEN_CREATE` | — | Open for reading and writing, creating the file if necessary. This is the behavior of `sqlite3_open()`. |
+  </Tab>
+  <Tab title="Optional Modifiers">
+    | Flag | Meaning |
+    |------|---------|
+    | `SQLITE_OPEN_URI` | Interpret the filename as a [URI filename](https://www.sqlite.org/uri.html). |
+    | `SQLITE_OPEN_MEMORY` | Open an in-memory database. The filename is used only for cache-sharing purposes when shared cache mode is enabled. |
+    | `SQLITE_OPEN_NOMUTEX` | Use multi-thread threading mode (separate threads, separate connections). |
+    | `SQLITE_OPEN_FULLMUTEX` | Use serialized threading mode (multiple threads, one connection). |
+    | `SQLITE_OPEN_SHAREDCACHE` | Enable shared cache mode for this connection. |
+    | `SQLITE_OPEN_PRIVATECACHE` | Disable shared cache mode for this connection. |
+    | `SQLITE_OPEN_NOFOLLOW` | Do not follow symbolic links. |
+  </Tab>
+</Tabs>
+
+## URI Filenames
+
+When `SQLITE_OPEN_URI` is passed (or URI handling is globally enabled via `sqlite3_config(SQLITE_CONFIG_URI, 1)`), the filename is interpreted as a URI of the form:
+
+```
+file:path/to/database?param=value&param2=value2
+```
+
+Common URI forms:
+
+| URI | Meaning |
+|-----|---------|
+| `file:data.db` | Relative path |
+| `file:/absolute/path/data.db` | Absolute path |
+| `:memory:` | Private in-memory database |
+| `file::memory:?cache=shared` | Shared in-memory database (multiple connections share one DB) |
+| `file:data.db?mode=ro` | Read-only via URI parameter |
+| `file:data.db?mode=memory&cache=shared` | Named shared in-memory database |
+
+<Tip>
+  Use `file::memory:?cache=shared` when you need multiple database connections to share the same in-memory database within the same process. Each connection that opens this URI sees the same data.
+</Tip>
+
+## Closing a Database
+
+### sqlite3_close
+
+```c
+int sqlite3_close(sqlite3*);
+```
+
+Destroys a database connection and releases all associated resources. Returns `SQLITE_OK` on success. If the connection has unfinalized prepared statements, unclosed BLOB handles, or unfinished `sqlite3_backup` objects, `sqlite3_close()` returns `SQLITE_BUSY` and leaves the connection open.
+
+### sqlite3_close_v2 — Lazy Close
+
+```c
+int sqlite3_close_v2(sqlite3*);
+```
+
+Like `sqlite3_close()`, but returns `SQLITE_OK` even if there are outstanding prepared statements or BLOB handles. Instead of refusing to close, it marks the connection as a "zombie" and defers actual deallocation until all remaining handles are released. This is designed for garbage-collected host languages where destructor ordering is unpredictable.
+
+<Warning>
+  After calling `sqlite3_close_v2()`, do not use the `sqlite3*` handle for anything other than finalizing remaining prepared statements and closing BLOB handles. Any new database operations on a zombie connection will fail.
+</Warning>
+
+## Getting the Database Filename
+
+```c
+sqlite3_filename sqlite3_db_filename(sqlite3 *db, const char *zDbName);
+```
+
+Returns the absolute filename of the database attached to the connection under the schema name `zDbName`. Pass `"main"` for the main database, `"temp"` for the temporary database, or the name used in an `ATTACH` statement. Returns `NULL` or an empty string for in-memory and temporary databases.
+
+## Complete Open / Close Pattern
+
+The following example shows the recommended pattern for opening and closing an SQLite database with full error handling:
+
+```c
+#include <sqlite3.h>
+#include <stdio.h>
+
+int main(void) {
+    sqlite3 *db = NULL;
+    int rc;
+
+    /* Open the database for reading and writing, creating if necessary */
+    rc = sqlite3_open_v2(
+        "myapp.db",
+        &db,
+        SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+        NULL   /* use default VFS */
+    );
+
+    if (rc != SQLITE_OK) {
+        /* db may still be non-NULL even on error — must close it */
+        fprintf(stderr, "Cannot open database: %s\n",
+                db ? sqlite3_errmsg(db) : "out of memory");
+        sqlite3_close(db);
+        return 1;
+    }
+
+    /* Retrieve and print the resolved filename */
+    const char *path = sqlite3_db_filename(db, "main");
+    printf("Opened: %s\n", path ? path : "(in-memory)");
+
+    /* ... use the database ... */
+
+    /* Close: finalize all statements first for sqlite3_close() */
+    rc = sqlite3_close(db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Close failed: %s\n", sqlite3_errmsg(db));
+        return 1;
+    }
+
+    return 0;
+}
+```
+
+<Note>
+  Calling `sqlite3_close()` or `sqlite3_close_v2()` with a `NULL` pointer is a safe no-op. This means you can safely call `sqlite3_close(db)` even when `db` was never successfully initialized — SQLite handles it gracefully.
+</Note>
+
+## In-Memory Database Example
+
+```c
+sqlite3 *db = NULL;
+
+/* Open a private in-memory database */
+int rc = sqlite3_open_v2(
+    ":memory:",
+    &db,
+    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MEMORY,
+    NULL
+);
+
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Failed to open in-memory DB: %s\n", sqlite3_errmsg(db));
+    sqlite3_close(db);
+    return 1;
+}
+
+/* In-memory databases vanish when the connection closes */
+sqlite3_close(db);
+```
+
+## Error Handling Summary
+
+| Scenario | `sqlite3_close` behavior | `sqlite3_close_v2` behavior |
+|----------|--------------------------|------------------------------|
+| No open handles | Returns `SQLITE_OK` | Returns `SQLITE_OK` |
+| Unfinalized prepared statements | Returns `SQLITE_BUSY`, leaves connection open | Returns `SQLITE_OK`, defers cleanup |
+| Unclosed BLOB handles | Returns `SQLITE_BUSY` | Returns `SQLITE_OK`, defers cleanup |
+| NULL pointer argument | Safe no-op | Safe no-op |

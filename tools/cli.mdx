@@ -1,0 +1,723 @@
+---
+title: "The SQLite Command-Line Shell (sqlite3)"
+sidebarTitle: "CLI Shell"
+description: "A comprehensive reference for the sqlite3 command-line shell: opening databases, running SQL, and every dot-command grouped by category."
+---
+
+The `sqlite3` command-line shell is an interactive program that lets you create and query SQLite databases directly from your terminal. It accepts SQL statements, special dot-commands that control the shell itself, and can read SQL scripts from files—making it equally useful for quick exploration and automated database management tasks.
+
+## Installation and Building
+
+<Tabs>
+  <Tab title="Pre-built Binaries">
+    Pre-compiled binaries for Windows, macOS, and Linux are available on the [SQLite download page](https://sqlite.org/download.html). Download the appropriate package for your platform and place the `sqlite3` (or `sqlite3.exe`) executable somewhere on your `PATH`.
+  </Tab>
+  <Tab title="Build from Source (Unix)">
+    Building from source requires a C compiler. TCL is **not** needed just to build the CLI.
+
+    ```bash
+    # Install build dependencies (Debian/Ubuntu example)
+    apt install gcc make
+
+    # Unpack the source and create a build directory
+    tar xzf sqlite.tar.gz
+    mkdir bld && cd bld
+
+    # Configure and build
+    ../sqlite/configure
+    make sqlite3
+    ```
+
+    The resulting `sqlite3` binary can be copied anywhere on your `PATH`.
+
+    <Tip>
+      Add a `linenoise` source tree as a sibling directory named `linenoise` (or at `$HOME/linenoise`) before running `./configure` to enable full command-line editing support automatically.
+    </Tip>
+  </Tab>
+  <Tab title="Build from Source (Windows / MSVC)">
+    On Windows, use the provided `make.bat` wrapper with MSVC:
+
+    ```bash
+    make sqlite3.exe
+    ```
+
+    Alternatively, pass `nmake /f Makefile.msc` directly if you prefer not to use the batch file.
+  </Tab>
+</Tabs>
+
+---
+
+## Opening a Database
+
+```bash
+# Open (or create) a database file
+sqlite3 mydb.db
+
+# Open an in-memory database (lost when the shell exits)
+sqlite3 :memory:
+
+# Open using a file URI with options
+sqlite3 "file:mydb.db?mode=ro"
+```
+
+<Note>
+  When you specify a filename that does not exist, SQLite creates an empty database at that path the first time a write occurs. Passing `:memory:` keeps everything in RAM for the lifetime of the session.
+</Note>
+
+### Special Database Name Values
+
+| Name | Behaviour |
+|------|-----------|
+| `:memory:` | In-memory database, private to the connection |
+| `""` (empty string) | Temporary on-disk database, deleted on close |
+| `file:path?options` | File URI with VFS options (e.g., `mode=ro`, `cache=shared`) |
+
+---
+
+## Running SQL
+
+### Interactive Mode
+
+Start the shell without arguments or with a filename and type SQL statements at the `sqlite>` prompt. Statements are executed when you enter a terminating semicolon.
+
+```sql
+sqlite> CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT, created_at TEXT);
+sqlite> INSERT INTO notes(body, created_at) VALUES('Hello, SQLite', datetime('now'));
+sqlite> SELECT * FROM notes;
+1|Hello, SQLite|2024-03-15 10:22:00
+```
+
+### Running a Script File
+
+Pipe a `.sql` file into the shell to execute it non-interactively:
+
+```bash
+sqlite3 mydb.db < schema.sql
+```
+
+Or use the `.read` dot-command from within the shell:
+
+```sql
+sqlite> .read schema.sql
+```
+
+### One-Shot Commands
+
+Pass SQL directly on the command line with the `-cmd` or inline argument pattern:
+
+```bash
+# Execute a single statement and exit
+sqlite3 mydb.db "SELECT count(*) FROM notes;"
+
+# Execute a dot-command then a statement
+sqlite3 mydb.db -cmd ".mode column" "SELECT * FROM notes LIMIT 5;"
+```
+
+---
+
+## Dot-Commands Reference
+
+Dot-commands are special directives that control the shell; they always begin with `.` and are **not** SQL. Type `.help` inside the shell to see a quick summary.
+
+<Accordion title="Database Connection & Files">
+
+### `.open`
+
+Close the current database and open a new one.
+
+```text
+.open ?OPTIONS? ?FILE?
+```
+
+| Option | Effect |
+|--------|--------|
+| `--append` | Use appendvfs to append database to the end of FILE |
+| `--deserialize` | Load into memory using `sqlite3_deserialize()` |
+| `--ifexist` | Only open if FILE already exists |
+| `--maxsize N` | Maximum size for `--deserialize` or `--hexdb` database |
+| `--new` | Initialize FILE to an empty database |
+| `--normal` | FILE is an ordinary SQLite database (default) |
+| `--nofollow` | Do not follow symbolic links |
+| `--readonly` | Open FILE read-only |
+| `--zip` | FILE is a ZIP archive |
+
+```sql
+sqlite> .open production.db
+sqlite> .open --readonly archive.db
+sqlite> .open :memory:
+```
+
+### `.databases`
+
+List names and file paths of all attached databases.
+
+```sql
+sqlite> .databases
+main: /home/user/mydb.db r/w
+```
+
+### `.quit` / `.exit`
+
+Stop interpreting input. `.quit` exits the shell if it is the primary input stream; `.exit ?CODE?` exits with the given return code.
+
+```sql
+sqlite> .quit
+```
+
+### `.backup`
+
+Back up a database to a file.
+
+```text
+.backup ?DB? FILE
+```
+
+| Option | Effect |
+|--------|--------|
+| `--append` | Use the appendvfs |
+| `--async` | Write without journal and fsync() |
+
+```sql
+sqlite> .backup main backup.db
+```
+
+### `.restore`
+
+Restore the content of a database from a previously created backup file.
+
+```text
+.restore ?DB? FILE
+```
+
+```sql
+sqlite> .restore main backup.db
+```
+
+### `.clone`
+
+Clone all data from the currently open database into a new database file.
+
+```sql
+sqlite> .clone newcopy.db
+```
+
+</Accordion>
+
+<Accordion title="Schema Inspection">
+
+### `.tables`
+
+List names of tables matching an optional LIKE pattern.
+
+```sql
+sqlite> .tables
+notes   users   sessions
+
+sqlite> .tables user%
+users
+```
+
+### `.schema`
+
+Show `CREATE` statements for objects matching a LIKE pattern.
+
+```text
+.schema ?PATTERN?
+```
+
+| Option | Effect |
+|--------|--------|
+| `--indent` | Pretty-print the schema |
+| `--nosys` | Omit objects whose names start with `sqlite_` |
+
+```sql
+sqlite> .schema notes
+CREATE TABLE notes(id INTEGER PRIMARY KEY, body TEXT, created_at TEXT);
+
+sqlite> .schema --indent
+CREATE TABLE notes(
+  id INTEGER PRIMARY KEY,
+  body TEXT,
+  created_at TEXT
+);
+```
+
+### `.fullschema`
+
+Show the complete schema including the contents of `sqlite_stat` tables (populated by `ANALYZE`).
+
+```sql
+sqlite> .fullschema
+```
+
+### `.indexes`
+
+Show names of indexes matching a LIKE pattern.
+
+```text
+.indexes ?PATTERN?
+```
+
+| Option | Effect |
+|--------|--------|
+| `-a` / `--all` | Also show system-generated indexes |
+| `--expr` | Show only expression indexes |
+| `--sys` | Show only system-generated indexes |
+
+```sql
+sqlite> .indexes
+idx_notes_created
+
+sqlite> .indexes --all
+idx_notes_created
+sqlite_autoindex_users_1
+```
+
+</Accordion>
+
+<Accordion title="Output Formatting">
+
+### `.mode`
+
+Set the output display mode.
+
+```text
+.mode ?MODE? ?OPTIONS?
+```
+
+| Mode | Description |
+|------|-------------|
+| `ascii` | Columns/rows delimited by ASCII 0x1F / 0x1E |
+| `box` | Tables using Unicode box-drawing characters |
+| `column` | Left-aligned columns (default width auto-sized) |
+| `csv` | Comma-separated values |
+| `html` | HTML `<table>` markup |
+| `insert` | SQL `INSERT` statements for the named table |
+| `json` | JSON array of objects |
+| `line` | One value per line, `key = value` format |
+| `list` | Values separated by the configured separator (default `\|`) |
+| `markdown` | Markdown pipe-table format |
+| `quote` | SQL literal quoting |
+| `tabs` | Tab-separated values |
+| `tcl` | TCL list format |
+
+```sql
+sqlite> .mode column
+sqlite> SELECT id, body FROM notes;
+id  body
+--  ------------
+1   Hello, SQLite
+
+sqlite> .mode json
+sqlite> SELECT id, body FROM notes;
+[{"id":1,"body":"Hello, SQLite"}]
+
+sqlite> .mode markdown
+sqlite> SELECT id, body FROM notes;
+| id | body          |
+|----|---------------|
+| 1  | Hello, SQLite |
+```
+
+### `.headers`
+
+Turn display of column headers on or off.
+
+```sql
+sqlite> .headers on
+sqlite> SELECT id, body FROM notes;
+id|body
+1|Hello, SQLite
+
+sqlite> .headers off
+```
+
+### `.nullvalue`
+
+Specify the string to display in place of `NULL`.
+
+```sql
+sqlite> .nullvalue "(null)"
+sqlite> SELECT NULL;
+(null)
+```
+
+### `.width`
+
+Set minimum column widths for columnar output. Negative values right-justify.
+
+```sql
+sqlite> .width 5 -20
+sqlite> SELECT id, body FROM notes;
+id          body
+--  ----------------
+ 1     Hello, SQLite
+```
+
+### `.separator`
+
+Change the column separator (and optionally the row separator) used by `.mode list` and similar.
+
+```sql
+sqlite> .separator "," "\n"
+```
+
+</Accordion>
+
+<Accordion title="Import & Export">
+
+### `.import`
+
+Import data from a file into a table. The file format is inferred from the current `.mode` setting (default: CSV).
+
+```text
+.import FILE TABLE
+```
+
+```sql
+-- Import a CSV file
+sqlite> .mode csv
+sqlite> .import data.csv notes
+
+-- Import with headers (first row skipped as column names)
+sqlite> .import --csv --skip 1 data.csv notes
+```
+
+### `.dump`
+
+Render database content as SQL `INSERT` and `CREATE` statements, suitable for backup or migration.
+
+```text
+.dump ?OBJECTS?
+```
+
+| Option | Effect |
+|--------|--------|
+| `--data-only` | Output only `INSERT` statements |
+| `--newlines` | Allow unescaped newlines in output |
+| `--nosys` | Omit system tables (e.g., `sqlite_stat1`) |
+| `--preserve-rowids` | Include `ROWID` values in output |
+
+```sql
+-- Dump the entire database
+sqlite> .dump
+
+-- Dump only the notes table
+sqlite> .dump notes
+```
+
+```bash
+# Save dump to a file via shell redirection
+sqlite3 mydb.db .dump > backup.sql
+```
+
+### `.read`
+
+Read and execute SQL (or dot-commands) from a file. If `FILE` begins with `|`, it is treated as a command whose output is read.
+
+```sql
+sqlite> .read schema.sql
+sqlite> .read |./generate_fixtures.sh
+```
+
+### `.output`
+
+Redirect all subsequent output to a file, or back to stdout if no file is given.
+
+```sql
+sqlite> .output report.txt
+sqlite> SELECT * FROM notes;
+sqlite> .output
+```
+
+### `.once`
+
+Redirect output for the **next** SQL command only.
+
+```sql
+sqlite> .once results.csv
+sqlite> SELECT * FROM notes;
+```
+
+### `.excel`
+
+Display the output of the next command in a spreadsheet application.
+
+```sql
+sqlite> .excel
+sqlite> SELECT * FROM notes;
+```
+
+</Accordion>
+
+<Accordion title="Query Analysis & Debugging">
+
+### `.explain`
+
+Change the `EXPLAIN` formatting mode.
+
+```text
+.explain ?on|off|auto?
+```
+
+`auto` (the default) enables EXPLAIN formatting automatically whenever the output resembles VDBE bytecode.
+
+```sql
+sqlite> .explain on
+sqlite> EXPLAIN SELECT * FROM notes WHERE id = 1;
+```
+
+### `.eqp`
+
+Enable or disable automatic `EXPLAIN QUERY PLAN` output before each query.
+
+```text
+.eqp on|off|full|trigger
+```
+
+| Value | Effect |
+|-------|--------|
+| `on` | Show abbreviated query plan |
+| `full` | Show detailed query plan |
+| `trigger` | Like `full`, also show trigger bytecode |
+| `off` | Disable |
+
+```sql
+sqlite> .eqp on
+sqlite> SELECT * FROM notes WHERE created_at > '2024-01-01';
+QUERY PLAN
+`--SCAN notes
+```
+
+### `.trace`
+
+Output each SQL statement as it is executed.
+
+```text
+.trace ?OPTIONS?
+```
+
+| Option | Effect |
+|--------|--------|
+| `FILE` | Send trace output to FILE |
+| `stdout` | Send to stdout |
+| `stderr` | Send to stderr |
+| `off` | Disable tracing |
+| `--expanded` | Expand bound query parameters |
+| `--plain` | Show SQL as entered |
+| `--stmt` | Trace statement execution (`SQLITE_TRACE_STMT`) |
+| `--profile` | Profile statements (`SQLITE_TRACE_PROFILE`) |
+| `--row` | Trace each row (`SQLITE_TRACE_ROW`) |
+| `--close` | Trace connection close (`SQLITE_TRACE_CLOSE`) |
+
+```sql
+sqlite> .trace stdout
+sqlite> SELECT count(*) FROM notes;
+SELECT count(*) FROM notes;
+1
+sqlite> .trace off
+```
+
+</Accordion>
+
+<Accordion title="Performance & Diagnostics">
+
+### `.timer`
+
+Turn the SQL execution timer on or off. Reports wall-clock time after each statement.
+
+```sql
+sqlite> .timer on
+sqlite> SELECT count(*) FROM notes;
+count(*)
+--------
+42
+Run Time: real 0.001 user 0.000200 sys 0.000100
+
+sqlite> .timer off
+```
+
+### `.stats`
+
+Show statement statistics or toggle automatic stat display.
+
+```text
+.stats ?ARG?
+```
+
+| Argument | Effect |
+|----------|--------|
+| `on` | Turn on automatic stat display after each statement |
+| `off` | Turn off automatic stat display |
+| `stmt` | Show statement stats immediately |
+| `vmstep` | Show only the virtual machine step count |
+
+```sql
+sqlite> .stats on
+```
+
+### `.limit`
+
+Display or change the value of an `SQLITE_LIMIT_*` resource limit.
+
+```text
+.limit ?LIMIT? ?VAL?
+```
+
+```sql
+sqlite> .limit
+SQLITE_LIMIT_LENGTH             1073741824
+SQLITE_LIMIT_SQL_LENGTH         1073741824
+SQLITE_LIMIT_COLUMN                   2000
+...
+
+sqlite> .limit SQLITE_LIMIT_ATTACHED 5
+```
+
+### `.scanstats`
+
+Toggle `sqlite3_stmt_scanstatus()` metrics, which report how many rows each step of a query examined.
+
+```sql
+sqlite> .scanstats on
+sqlite> SELECT * FROM notes;
+```
+
+</Accordion>
+
+<Accordion title="Extensions & Advanced Features">
+
+### `.load`
+
+Load a shared-library SQLite extension.
+
+```text
+.load FILE ?ENTRY?
+```
+
+`ENTRY` is the name of the entry-point function; if omitted, SQLite infers it from the filename.
+
+```sql
+sqlite> .load ./myextension
+sqlite> .load /usr/lib/sqlite3/pcre.so sqlite3_pcre_init
+```
+
+<Warning>
+  Extension loading is disabled in some builds for security reasons. The shell must have been compiled without `SQLITE_OMIT_LOAD_EXTENSION` for this command to be available.
+</Warning>
+
+### `.session`
+
+Create or control change-tracking sessions (requires `SQLITE_ENABLE_SESSION`).
+
+```text
+.session ?NAME? CMD ...
+```
+
+| Subcommand | Effect |
+|------------|--------|
+| `open DB NAME` | Open a new session on database DB |
+| `attach TABLE` | Attach a table to the session |
+| `changeset FILE` | Write a changeset into FILE |
+| `patchset FILE` | Write a patchset into FILE |
+| `close` | Close the session |
+| `enable ?BOOLEAN?` | Enable or disable the session |
+| `filter GLOB...` | Reject tables matching GLOBs |
+| `indirect ?BOOLEAN?` | Mark or query indirect status |
+| `isempty` | Query whether the session is empty |
+| `list` | List currently open session names |
+
+```sql
+sqlite> .session s1 open main s1
+sqlite> .session s1 attach notes
+sqlite> INSERT INTO notes(body, created_at) VALUES('New note', datetime('now'));
+sqlite> .session s1 changeset changes.cs
+sqlite> .session s1 close
+```
+
+### `.archive`
+
+Manage SQL archive files (requires `SQLITE_HAVE_ZLIB`).
+
+```text
+.archive ...
+```
+
+| Flag | Effect |
+|------|--------|
+| `-c` / `--create` | Create a new archive |
+| `-u` / `--update` | Add or update files with changed mtime |
+| `-i` / `--insert` | Like `--update` but always add even if unchanged |
+| `-r` / `--remove` | Remove files from archive |
+| `-t` / `--list` | List contents of archive |
+| `-x` / `--extract` | Extract files from archive |
+| `-v` / `--verbose` | Print each filename as it is processed |
+| `-f FILE` / `--file FILE` | Use archive FILE (default: current db) |
+| `-C DIR` / `--directory DIR` | Read/extract files from directory DIR |
+
+```sql
+sqlite> .ar -cf archive.sqlar foo.txt bar.txt
+sqlite> .ar -tf archive.sqlar
+sqlite> .ar -xvf archive.sqlar
+```
+
+</Accordion>
+
+---
+
+## Example Sessions
+
+<CodeGroup>
+
+```sql Interactive Exploration
+sqlite3 mydb.db
+
+sqlite> .headers on
+sqlite> .mode column
+sqlite> .tables
+notes   users
+
+sqlite> .schema users
+CREATE TABLE users(
+  id    INTEGER PRIMARY KEY,
+  email TEXT UNIQUE NOT NULL,
+  name  TEXT
+);
+
+sqlite> SELECT id, email FROM users LIMIT 3;
+id  email
+--  ---------------------
+1   alice@example.com
+2   bob@example.com
+3   carol@example.com
+
+sqlite> .quit
+```
+
+```bash Script Automation
+#!/bin/bash
+# Export the notes table as CSV
+sqlite3 -separator ',' mydb.db <<'EOF'
+.headers on
+.mode csv
+.output /tmp/notes_export.csv
+SELECT id, body, created_at FROM notes ORDER BY created_at;
+.output
+EOF
+echo "Export complete: /tmp/notes_export.csv"
+```
+
+```sql Schema Migration
+-- Run from a .sql file: sqlite3 mydb.db < migrate.sql
+BEGIN;
+
+ALTER TABLE notes ADD COLUMN updated_at TEXT;
+
+UPDATE notes SET updated_at = created_at;
+
+CREATE INDEX idx_notes_updated ON notes(updated_at);
+
+COMMIT;
+```
+
+</CodeGroup>

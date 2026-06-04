@@ -1,0 +1,201 @@
+---
+title: "sqlite3_analyzer: Database Space Usage Analysis"
+sidebarTitle: "Analyzer"
+description: "Use sqlite3_analyzer to inspect page counts, payload ratios, fragmentation, and storage efficiency for every table and index in an SQLite database."
+---
+
+`sqlite3_analyzer` is a standalone command-line tool that opens an SQLite database file and produces a detailed, human-readable report of how disk space is allocated across every table and index. It breaks down storage into payload bytes, metadata overhead, unused (free) space, and overflow pages, making it the first tool to reach for when diagnosing an unexpectedly large database, planning a `VACUUM`, or understanding the cost of a particular index.
+
+## How It Works
+
+`sqlite3_analyzer` is built from the SQLite source tree by combining the SQLite amalgamation with a TCL script (`tool/spaceanal.tcl`) that queries the `dbstat` virtual table. The `dbstat` virtual table enumerates every B-tree page in the database and exposes per-page statistics; `spaceanal.tcl` aggregates those statistics and formats the final report. Because it is compiled into a single self-contained executable, no TCL runtime is required at run-time.
+
+<Note>
+  Building `sqlite3_analyzer` requires TCL development libraries (`tcl-dev` on Debian/Ubuntu) because the TCL script is compiled into the binary at build time.
+</Note>
+
+---
+
+## Building sqlite3_analyzer
+
+<Tabs>
+  <Tab title="Unix / macOS">
+    ```bash
+    # Install build dependencies (Debian/Ubuntu)
+    apt install gcc make tcl-dev
+
+    # Unpack sources and create a build directory
+    tar xzf sqlite.tar.gz
+    mkdir bld && cd bld
+
+    # Configure (TCL is required for this target)
+    ../sqlite/configure
+
+    # Build the analyzer
+    make sqlite3_analyzer
+    ```
+
+    The resulting `sqlite3_analyzer` binary is self-contained and can be copied to any location on your `PATH`.
+  </Tab>
+  <Tab title="Windows / MSVC">
+    ```bat
+    make sqlite3_analyzer.exe
+    ```
+
+    TCL development libraries must be installed and `TCLDIR` set before running this target. See the SQLite [compile-for-windows](https://sqlite.org/compile.html) documentation for details.
+  </Tab>
+</Tabs>
+
+---
+
+## Running sqlite3_analyzer
+
+```bash
+sqlite3_analyzer database.db
+```
+
+### Options
+
+```text
+Usage: sqlite3_analyzer ?--pageinfo? ?--stats? database-filename
+```
+
+| Option | Effect |
+|--------|--------|
+| `--pageinfo` | Show how each individual page of the database file is used |
+| `--stats` | Output SQL `INSERT` statements that populate a statistics table instead of the human-readable report |
+| `--version` | Print the SQLite version number and exit |
+
+```bash
+# Standard analysis report
+sqlite3_analyzer myapp.db
+
+# Per-page breakdown
+sqlite3_analyzer --pageinfo myapp.db
+
+# Machine-readable statistics (pipe into a new SQLite database)
+sqlite3_analyzer --stats myapp.db | sqlite3 stats.db
+```
+
+---
+
+## Understanding the Output
+
+The report is divided into sections. The first section covers the **entire database**, followed by one section for each table and associated index. Each section contains a consistent set of statistics.
+
+### Example Output
+
+```text
+/** Disk-Space Utilization Report For myapp.db
+
+Page size in bytes................................ 4096
+Pages in the whole file (measured)............... 512
+Pages in the whole file (calculated)............. 512
+Pages that store data............................ 498      97.3%
+Pages on the freelist (per header)............... 0         0.0%
+Pages on the freelist (calculated)............... 0         0.0%
+Pages of auto-vacuum overhead.................... 0         0.0%
+Number of tables in the database................. 6
+Number of indexes................................ 4
+Number of named tables........................... 4
+Number of named indexes.......................... 4
+Size of the file in bytes........................ 2097152
+Bytes of user payload stored..................... 1442680   68.8%
+
+*** Table NOTES and all its indexes ****************************
+
+Percentage of total database..................... 38.3%
+Number of entries................................ 12500
+Bytes of storage consumed........................ 802816
+Bytes of payload................................. 614200    76.5% of storage consumed
+Bytes of metadata................................ 136800    17.0% of metadata
+B-tree depth..................................... 3
+Average payload per entry........................ 49.14
+Average unused bytes per entry................... 4.15
+Average metadata per entry....................... 10.94
+Fragmentation.................................... 1.2%
+```
+
+### Statistics Explained
+
+<CardGroup cols={2}>
+  <Card title="Pages & Storage" icon="database">
+    **Pages in the whole file** — total number of fixed-size pages (default 4096 bytes each) that make up the database file.
+
+    **Pages that store data** — pages actively used by B-trees (leaf, interior, and overflow pages).
+
+    **Pages on the freelist** — pages available for reuse; a large freelist suggests running `VACUUM` would reclaim space.
+  </Card>
+  <Card title="Payload & Metadata" icon="chart-bar">
+    **Bytes of payload** — actual user data (column values) stored in the table or index.
+
+    **Bytes of metadata** — B-tree page headers, cell pointers, rowid and overflow link storage.
+
+    **Bytes of storage consumed** — total bytes of database pages assigned to this object.
+  </Card>
+  <Card title="Overflow Pages" icon="arrow-right">
+    Rows whose column data exceed the in-page threshold spill onto dedicated **overflow pages**. High overflow counts indicate wide TEXT or BLOB columns and can degrade read performance.
+  </Card>
+  <Card title="Fragmentation" icon="puzzle-piece">
+    **Fragmentation** is the percentage of page-transitions in the B-tree that are non-sequential on disk. High fragmentation increases I/O for range scans. Running `VACUUM` rebuilds the database with a sequential layout, eliminating fragmentation.
+  </Card>
+</CardGroup>
+
+---
+
+## Interpreting Results and Common Actions
+
+<Accordion title="Finding Bloated Tables">
+  Look for tables where **bytes of storage consumed** is significantly larger than **bytes of payload**. A low payload-to-storage ratio indicates wasted space, often caused by a large freelist from previous `DELETE` operations.
+
+  ```bash
+  # Inspect the report for the tables with the most wasted space
+  sqlite3_analyzer myapp.db 2>&1 | grep -A 5 "Percentage of total"
+  ```
+</Accordion>
+
+<Accordion title="Planning a VACUUM">
+  If the top-level summary shows a non-zero **pages on the freelist**, running `VACUUM` will compact the database and return those pages to the OS.
+
+  ```sql
+  -- Inside the sqlite3 shell
+  sqlite3 myapp.db "VACUUM;"
+  ```
+
+  Run `sqlite3_analyzer` again afterward to confirm the reduction in file size.
+
+  <Tip>
+    For large, live databases that cannot afford a full `VACUUM` lock, consider `PRAGMA incremental_vacuum(N)` with `PRAGMA auto_vacuum = INCREMENTAL`.
+  </Tip>
+</Accordion>
+
+<Accordion title="Understanding Index Overhead">
+  Each named index appears as its own sub-section. Compare an index's **bytes of storage consumed** against the payload it stores. An index on a high-cardinality INTEGER column will be compact; an index on a wide TEXT column may rival the table itself in size.
+
+  Use this information to decide whether a rarely-used index is worth keeping.
+</Accordion>
+
+<Accordion title="Detecting Overflow Pages">
+  The **number of entries that use overflow** statistic reveals how many rows have columns too large to fit on a single B-tree page. If this number is high relative to total entries, consider storing large BLOBs or TEXT values externally and keeping only a reference in the database.
+</Accordion>
+
+---
+
+## The --stats Mode
+
+Passing `--stats` makes `sqlite3_analyzer` emit SQL `INSERT` statements instead of human-readable text. The statements populate a `stats` table with per-page data that you can load into a separate SQLite database for programmatic analysis.
+
+```bash
+# Collect raw stats into a new database
+sqlite3_analyzer --stats myapp.db | sqlite3 analysis.db
+
+# Query the collected stats
+sqlite3 analysis.db "
+  SELECT name, pagetype, count(*) AS pages, sum(payload) AS payload_bytes
+  FROM stats
+  GROUP BY name, pagetype
+  ORDER BY payload_bytes DESC;
+"
+```
+
+The `stats` table schema contains columns for page type (`internal`, `leaf`, `overflow`), cell count, payload bytes, unused bytes, and maximum payload per page.

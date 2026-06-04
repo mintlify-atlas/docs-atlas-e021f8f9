@@ -1,0 +1,199 @@
+---
+title: "Incremental BLOB I/O with SQLite C API"
+sidebarTitle: "BLOB I/O"
+description: "Perform random-access reads and writes on large SQLite BLOB columns without loading the entire value into memory using the sqlite3_blob_* API."
+---
+
+Storing large binary objects — images, audio clips, firmware binaries — directly in SQLite is straightforward, but reading or writing a 50 MB BLOB through a prepared statement means loading the entire value into memory at once. The incremental BLOB I/O API avoids this by giving you a file-like handle (`sqlite3_blob`) to an existing BLOB row. You can then read or write any sub-range of bytes without touching the rest of the value, streaming data in small chunks and keeping your application's memory footprint flat.
+
+## Opening a BLOB Handle
+
+```c
+int sqlite3_blob_open(
+  sqlite3*,
+  const char *zDb,
+  const char *zTable,
+  const char *zColumn,
+  sqlite3_int64 iRow,
+  int flags,
+  sqlite3_blob **ppBlob
+);
+```
+
+<ParamField path="zDb" type="const char*" required>
+  Symbolic database name: `"main"` for the primary file, `"temp"` for the temporary database, or the name used after `AS` in an `ATTACH` statement.
+</ParamField>
+
+<ParamField path="zTable" type="const char*" required>
+  Table name. The table must have a rowid (i.e. it must not be a `WITHOUT ROWID` table).
+</ParamField>
+
+<ParamField path="zColumn" type="const char*" required>
+  Column name. The cell must contain a TEXT or BLOB value, not an integer or float.
+</ParamField>
+
+<ParamField path="iRow" type="sqlite3_int64" required>
+  The rowid of the row to open.
+</ParamField>
+
+<ParamField path="flags" type="int" required>
+  `0` for read-only access; any non-zero value for read/write access.
+</ParamField>
+
+<ParamField path="ppBlob" type="sqlite3_blob**" required>
+  Output parameter. On success, `*ppBlob` is set to the new handle. On failure (other than `SQLITE_MISUSE`), `*ppBlob` is set to `NULL`, so it is always safe to call `sqlite3_blob_close()` on `*ppBlob` after this function returns.
+</ParamField>
+
+`sqlite3_blob_open()` returns `SQLITE_OK` on success. It returns `SQLITE_ERROR` if:
+
+- The database, table, or column does not exist.
+- The row does not exist.
+- The cell value is not TEXT or BLOB.
+- The column is part of an index, `PRIMARY KEY`, or `UNIQUE` constraint and write access was requested.
+- Foreign key constraints are enabled, the column is a child key, and write access was requested.
+
+## Querying the BLOB Size
+
+```c
+int sqlite3_blob_bytes(sqlite3_blob *);
+```
+
+Returns the size of the BLOB in bytes. The size cannot be changed through the incremental I/O API. To resize a BLOB, use a regular `UPDATE` statement first, then open a new handle.
+
+## Reading from a BLOB
+
+```c
+int sqlite3_blob_read(sqlite3_blob *, void *Z, int N, int iOffset);
+```
+
+<ParamField path="Z" type="void*" required>
+  Destination buffer. Must be at least `N` bytes.
+</ParamField>
+
+<ParamField path="N" type="int" required>
+  Number of bytes to read.
+</ParamField>
+
+<ParamField path="iOffset" type="int" required>
+  Zero-based byte offset within the BLOB at which to start reading.
+</ParamField>
+
+Returns `SQLITE_OK` on success. Returns `SQLITE_ERROR` if `N` or `iOffset` is negative, or if `iOffset + N` exceeds the BLOB size. Returns `SQLITE_ABORT` if the BLOB handle has been **expired** (see below).
+
+## Writing to a BLOB
+
+```c
+int sqlite3_blob_write(sqlite3_blob *, const void *z, int n, int iOffset);
+```
+
+Parameters mirror `sqlite3_blob_read()`. The handle must have been opened with `flags != 0`; otherwise `SQLITE_READONLY` is returned. Writing does **not** change the BLOB's size — you can only overwrite existing bytes.
+
+## Moving the Handle to a Different Row
+
+```c
+int sqlite3_blob_reopen(sqlite3_blob *, sqlite3_int64 newRowid);
+```
+
+Repositions an existing handle to point to a different row in the **same** table, column, and database. This is significantly faster than closing the old handle and opening a new one because SQLite reuses internal state. The new row must satisfy the same constraints as `sqlite3_blob_open()`. If `sqlite3_blob_reopen()` fails, the handle enters an **aborted** state and all subsequent reads, writes, and reopens will return `SQLITE_ABORT` until the handle is closed.
+
+## Closing a BLOB Handle
+
+```c
+int sqlite3_blob_close(sqlite3_blob *);
+```
+
+Releases all resources. Always returns successfully from a resource-management perspective — even if it returns an error code, the handle is closed. If the handle was opened for read/write, was the only active writer, and the database is in auto-commit mode, calling `sqlite3_blob_close()` commits the current transaction.
+
+Passing `NULL` (e.g. from a failed `sqlite3_blob_open()`) is a harmless no-op.
+
+## Expired BLOB Handles
+
+<Warning>
+  If the row a BLOB handle points to is modified or deleted by an `UPDATE`, `DELETE`, or `ON CONFLICT` side-effect — even in a **different column** — the handle is marked **expired**. All subsequent `sqlite3_blob_read()` and `sqlite3_blob_write()` calls return `SQLITE_ABORT`. Data written before expiry is **not** rolled back automatically, but may be overwritten by the statement that triggered expiry.
+
+  Use `sqlite3_blob_reopen()` to efficiently move the handle to a safe row, or close and re-open.
+</Warning>
+
+## Key Limitations
+
+<Note>
+  The incremental BLOB I/O API can only **overwrite** bytes within the existing BLOB. It cannot grow or shrink the BLOB. To change the size:
+  1. Run `UPDATE t SET col = zeroblob(new_size) WHERE rowid = ?` to allocate a new zero-filled BLOB of the desired size.
+  2. Open a fresh BLOB handle on that rowid.
+  3. Write your content with `sqlite3_blob_write()`.
+
+  `zeroblob(N)` and `sqlite3_result_zeroblob()` produce compact zero-filled placeholders that SQLite stores efficiently.
+</Note>
+
+## Complete Example: Reading and Writing a BLOB
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include "sqlite3.h"
+
+int main(void) {
+    sqlite3 *db;
+    sqlite3_blob *blob;
+    int rc;
+
+    /* ── Setup ───────────────────────────────────────────────────────── */
+    sqlite3_open("blobs.db", &db);
+    sqlite3_exec(db,
+        "CREATE TABLE IF NOT EXISTS files("
+        "  id   INTEGER PRIMARY KEY,"
+        "  data BLOB"
+        ");",
+        NULL, NULL, NULL);
+
+    /* Insert a 16-byte zeroblob placeholder */
+    sqlite3_exec(db,
+        "INSERT INTO files(id, data) VALUES (1, zeroblob(16));",
+        NULL, NULL, NULL);
+
+    /* ── Write ───────────────────────────────────────────────────────── */
+    rc = sqlite3_blob_open(db, "main", "files", "data",
+                           /*iRow=*/1, /*flags=*/1, &blob);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "blob_open: %s\n", sqlite3_errmsg(db));
+        goto done;
+    }
+
+    const char *payload = "Hello, BLOB world!";  /* 18 chars; fits in 16? */
+    int write_len = sqlite3_blob_bytes(blob);     /* respect the actual size */
+    if ((int)strlen(payload) < write_len)
+        write_len = (int)strlen(payload);
+
+    rc = sqlite3_blob_write(blob, payload, write_len, 0);
+    if (rc != SQLITE_OK)
+        fprintf(stderr, "blob_write: %s\n", sqlite3_errmsg(db));
+
+    sqlite3_blob_close(blob);
+    blob = NULL;
+
+    /* ── Read back ───────────────────────────────────────────────────── */
+    rc = sqlite3_blob_open(db, "main", "files", "data",
+                           /*iRow=*/1, /*flags=*/0, &blob);
+    if (rc != SQLITE_OK) goto done;
+
+    int sz = sqlite3_blob_bytes(blob);
+    char buf[64] = {0};
+    if (sz > (int)sizeof(buf) - 1) sz = (int)sizeof(buf) - 1;
+
+    rc = sqlite3_blob_read(blob, buf, sz, 0);
+    if (rc == SQLITE_OK)
+        printf("Read %d bytes: \"%s\"\n", sz, buf);
+
+    /* ── Reopen to row 2 (if it existed) ─────────────────────────────── */
+    /* rc = sqlite3_blob_reopen(blob, 2); */
+
+done:
+    sqlite3_blob_close(blob);
+    sqlite3_close(db);
+    return rc;
+}
+```
+
+<Tip>
+  For maximum write throughput on large BLOBs, wrap all writes in an explicit `BEGIN … COMMIT` transaction. Without it, each `sqlite3_blob_write()` call on an auto-commit connection incurs a full fsync.
+</Tip>

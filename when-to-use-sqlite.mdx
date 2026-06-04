@@ -1,0 +1,119 @@
+---
+title: "When to Use SQLite vs. Client-Server Databases"
+sidebarTitle: "When to Use"
+description: "A practical guide to choosing between SQLite and client-server databases like PostgreSQL or MySQL, with real-world scenarios, trade-offs, and a comparison table."
+---
+
+Picking the right database is an architectural decision with long-term consequences. SQLite and client-server databases such as PostgreSQL and MySQL are not competing products — they solve different problems, and the best choice depends entirely on how your application reads and writes data, how many concurrent users you expect, and how the software is distributed. The single most useful question to ask is: **does the database serve many concurrent clients over a network, or does it serve one application on one machine?** If the answer is the former, a client-server database is likely the right tool. If the latter, SQLite almost certainly is.
+
+<Info>
+  This page focuses on architectural fit. For the official SQLite project's own guidance, see [https://sqlite.org/whentouse.html](https://sqlite.org/whentouse.html).
+</Info>
+
+---
+
+## SQLite Is Not a Toy
+
+Before examining the trade-offs, it is worth dispelling a common misconception: SQLite is not a lightweight toy suitable only for tiny datasets. The SQLite file format supports databases up to **281 terabytes**. The library processes hundreds of millions of SQL operations per day across devices worldwide — every Android phone, every iPhone, every web browser, and most desktop applications carry an embedded SQLite instance. Many production deployments store gigabytes of data and serve millions of read requests without ever approaching a performance ceiling. The question is never whether SQLite is "powerful enough" in absolute terms — it is whether its specific concurrency and deployment model fits your use case.
+
+---
+
+## When SQLite Excels
+
+<Accordion title="Embedded and IoT Applications">
+  SQLite was designed for embedding. Because the entire database engine is a C library linked into the host process, it runs on systems with no operating-system services beyond basic file I/O — no network stack, no process scheduler, no remote authentication. Industrial controllers, automotive infotainment units, smart-home appliances, medical devices, and network routers all use SQLite to persist structured configuration and event data. The single-file database format means factory-provisioned data can be flashed to storage alongside firmware without any database initialisation step.
+</Accordion>
+
+<Accordion title="Mobile Applications (Android and iOS)">
+  Both the Android and Apple iOS platforms expose SQLite as their native local database API. Mobile apps benefit from SQLite's zero-configuration model because there is no server for the user to install or for the app store to provision. The database travels with the app, opens instantly, and is backed up or synced as a regular file. Even apps that ultimately persist data in a remote cloud database commonly use SQLite as a local cache, write-ahead queue, or offline-capable store.
+</Accordion>
+
+<Accordion title="Desktop Applications">
+  SQLite is widely used in desktop software — web browsers store browsing history, bookmarks, and cookies in SQLite databases; email clients index messages in SQLite; media players catalog libraries in SQLite. The key advantages are the same as for mobile: no server process, no installation friction, and the database file can be archived, copied, or emailed as a single artefact.
+</Accordion>
+
+<Accordion title="Application File Format">
+  SQLite makes an excellent structured file format. A single `.db` file is self-describing (the schema is stored inside it), readable with free tools (`sqlite3` CLI, DB Browser for SQLite), portable across architectures, and far more capable than CSV or JSON at representing relational data. Applications that previously used custom binary formats or XML documents for saved-file storage often switch to SQLite for improved queryability, atomicity, and cross-platform portability. The SQLite developers actively encourage this use case and maintain [long-term support for the file format](https://sqlite.org/lts.html).
+</Accordion>
+
+<Accordion title="Small to Medium Web Applications">
+  A website that handles a few hundred requests per second with modest write volumes runs perfectly on SQLite. Django, Ruby on Rails, and many other frameworks list SQLite as a supported backend. Because SQLite serialises writes at the database level using a WAL (write-ahead log) or exclusive lock, read concurrency is high and write concurrency is adequate for most single-machine web services. The infrastructure simplicity — no database server to provision, monitor, or patch — is a significant operational advantage for small teams and solo developers.
+</Accordion>
+
+<Accordion title="Testing and Continuous Integration">
+  SQLite is the go-to database for automated test suites. Swapping an application's production database (PostgreSQL, MySQL) for SQLite in tests eliminates external infrastructure dependencies, speeds up test execution, and makes tests portable across developer machines and CI runners without any setup. Many ORMs support this pattern out of the box.
+</Accordion>
+
+<Accordion title="Data Analysis and ETL">
+  The `sqlite3` CLI can import CSV files, run complex SQL queries with window functions, CTEs, and JSON operators, and export results — all without installing a database server. Data engineers frequently use SQLite as a fast, queryable scratchpad for intermediate ETL stages. Tools like Datasette and sqlite-utils have built a rich ecosystem around SQLite-as-analysis-platform. A 10 GB dataset can be loaded and queried on a laptop in seconds.
+</Accordion>
+
+---
+
+## When SQLite Is Not the Right Choice
+
+<Accordion title="High Write Concurrency from Many Processes">
+  SQLite allows only one writer at a time. In WAL mode, readers do not block writers and writers do not block readers, but concurrent writers still queue behind one another. If your application has dozens of independent processes or threads all writing frequently to the same database, you will encounter lock contention. A client-server database with fine-grained row-level or page-level locking — such as PostgreSQL — handles this pattern far better.
+</Accordion>
+
+<Accordion title="Very Large Databases with Many Concurrent Writers">
+  While the SQLite file format supports databases up to 281 TB, practical performance at very large scales with heavy concurrent write loads is better served by a client-server engine. PostgreSQL and MySQL have sophisticated buffer pool managers, parallel query engines, and partitioning support optimised for terabyte-scale OLTP and OLAP workloads with many simultaneous clients.
+</Accordion>
+
+<Accordion title="Client-Server Architecture Requirements">
+  If your architecture requires multiple application servers to share a single database over a network, SQLite is not appropriate. SQLite accesses the database file directly via the local filesystem. Accessing an SQLite file over NFS or a network share is explicitly unsupported and risks database corruption because network filesystems do not always implement the POSIX locking semantics that SQLite depends on.
+</Accordion>
+
+<Accordion title="Network Access and Remote Clients">
+  SQLite has no built-in network listener. There is no concept of a remote connection string, a database user account, or a TCP port. If your application needs to accept connections from remote clients — for example, as the backend of a multi-tenant SaaS product — you need a client-server database or a proxy layer. Some projects (e.g., Litestream, rqlite, Turso) add replication and network access on top of SQLite, but those are distinct products with their own trade-offs.
+</Accordion>
+
+<Accordion title="Advanced Replication and High Availability">
+  Client-server databases provide mature built-in support for streaming replication, logical replication, read replicas, and automatic failover. These features are essential for applications that require high availability or geographic distribution of data. SQLite has no built-in replication — the database is a local file, and replication is the responsibility of external tooling.
+</Accordion>
+
+---
+
+## Comparison Table
+
+| Criterion | SQLite | PostgreSQL / MySQL |
+|---|---|---|
+| Deployment | Drop-in library, no server | Install and run a server process |
+| Configuration | Zero-configuration | Server config files, user management |
+| Concurrent writers | One at a time (WAL mode improves reads) | Many simultaneous writers |
+| Concurrent readers | Unlimited (WAL mode) | Unlimited |
+| Maximum database size | 281 TB (file format limit) | Effectively unlimited (partitioned tablespaces) |
+| Network access | None (local files only) | Full TCP/IP client-server |
+| Replication | External tools only | Built-in streaming and logical replication |
+| User authentication | None (filesystem permissions) | Full user/role/privilege system |
+| ACID compliance | Full (WAL or rollback journal) | Full |
+| Licence | Public domain | PostgreSQL Licence / GPL |
+| Best for | Embedded, mobile, desktop, testing, local analysis | Multi-user, networked, high-concurrency production servers |
+
+---
+
+## Quick Decision Guide
+
+<CardGroup cols={2}>
+  <Card title="Choose SQLite when…" icon="circle-check">
+    - The database is accessed by a single application or process
+    - No network access to the database is required
+    - Zero-configuration deployment is a priority
+    - The use case is mobile, desktop, IoT, or embedded
+    - You need a structured, portable, self-contained file format
+    - Write concurrency is low to moderate
+    - You want to eliminate database infrastructure from tests
+  </Card>
+  <Card title="Choose a client-server database when…" icon="circle-xmark">
+    - Multiple application servers share one database
+    - High concurrent write throughput is required
+    - Remote clients connect to the database over a network
+    - You need built-in replication or high availability
+    - Fine-grained per-user access control is required
+    - The dataset grows beyond what a single file can efficiently serve at scale
+  </Card>
+</CardGroup>
+
+<Note>
+  When in doubt, start with SQLite. Its zero-overhead deployment makes it easy to prototype quickly, and migrating to a client-server database later — if concurrency or network requirements grow — is straightforward with most ORMs and migration tools.
+</Note>

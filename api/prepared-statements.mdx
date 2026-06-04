@@ -1,0 +1,323 @@
+---
+title: "Prepared Statements: sqlite3_prepare, step, finalize"
+sidebarTitle: "Prepared Statements"
+description: "Compile SQL into prepared statements with sqlite3_prepare_v2, execute with sqlite3_step, read columns, reset for reuse, and finalize to release resources."
+---
+
+Prepared statements are the backbone of the SQLite C API. Rather than re-parsing SQL text on every execution, you compile a statement once into an internal bytecode representation, execute it with `sqlite3_step()`, read results column by column, and then either reset it for another execution or finalize it to release resources. This lifecycle — prepare, bind, step, column, reset, finalize — gives you full control over query execution, type-safe column access, and efficient parameter reuse without SQL injection risk.
+
+## Compiling a Statement
+
+### sqlite3_prepare_v2 — Preferred Interface
+
+```c
+int sqlite3_prepare_v2(
+  sqlite3 *db,            /* Database handle */
+  const char *zSql,       /* SQL statement, UTF-8 encoded */
+  int nByte,              /* Maximum length of zSql in bytes */
+  sqlite3_stmt **ppStmt,  /* OUT: Statement handle */
+  const char **pzTail     /* OUT: Pointer to unused portion of zSql */
+);
+```
+
+<ParamField path="db" type="sqlite3 *" required>
+  An open database connection. Must not be closed while the prepared statement is in use.
+</ParamField>
+
+<ParamField path="zSql" type="const char *" required>
+  The SQL statement to compile as a UTF-8 string. Only the first statement is compiled; if the string contains multiple semicolon-separated statements, `*pzTail` will point to the beginning of the next one.
+</ParamField>
+
+<ParamField path="nByte" type="int" required>
+  If negative, `zSql` is read up to the first NUL terminator. If non-negative, at most `nByte` bytes are read. For NUL-terminated strings, passing `strlen(zSql) + 1` (including the terminator) gives a small performance advantage.
+</ParamField>
+
+<ParamField path="ppStmt" type="sqlite3_stmt **" required>
+  Output pointer that receives the compiled statement. Set to `NULL` on error, or if the input was empty/comment-only. Must not be `NULL` itself.
+</ParamField>
+
+<ParamField path="pzTail" type="const char **">
+  If not `NULL`, receives a pointer to the first byte past the end of the first compiled statement in `zSql`. Useful for compiling multiple statements from a single string.
+</ParamField>
+
+### sqlite3_prepare_v3 — With Prepare Flags
+
+```c
+int sqlite3_prepare_v3(
+  sqlite3 *db,            /* Database handle */
+  const char *zSql,       /* SQL statement, UTF-8 encoded */
+  int nByte,              /* Maximum length of zSql in bytes */
+  unsigned int prepFlags, /* Zero or more SQLITE_PREPARE_* flags */
+  sqlite3_stmt **ppStmt,  /* OUT: Statement handle */
+  const char **pzTail     /* OUT: Pointer to unused portion of zSql */
+);
+```
+
+Identical to `sqlite3_prepare_v2()` but accepts a `prepFlags` argument:
+
+| Flag | Effect |
+|------|--------|
+| `SQLITE_PREPARE_PERSISTENT` | Hints that the statement will be retained and reused many times. SQLite avoids using lookaside memory so as not to deplete the limited pool. Use this for statements cached in a connection pool. |
+| `SQLITE_PREPARE_NO_VTAB` | Returns `SQLITE_ERROR` if the statement references any virtual table. |
+| `SQLITE_PREPARE_DONT_LOG` | Suppresses error log messages on compilation failure. Useful for probing SQL syntax without polluting the error log. |
+
+```c
+sqlite3_stmt *stmt;
+int rc = sqlite3_prepare_v3(
+    db,
+    "SELECT * FROM sessions WHERE token = ?",
+    -1,
+    SQLITE_PREPARE_PERSISTENT,
+    &stmt,
+    NULL
+);
+```
+
+<Note>
+  Always use `sqlite3_prepare_v2()` or `sqlite3_prepare_v3()` in new code. The older `sqlite3_prepare()` is legacy and returns only a generic `SQLITE_ERROR` from `sqlite3_step()` instead of specific error codes.
+</Note>
+
+---
+
+## Executing a Statement
+
+### sqlite3_step
+
+```c
+int sqlite3_step(sqlite3_stmt *stmt);
+```
+
+Evaluates the next step of the compiled statement. Returns one of:
+
+| Return Code | Meaning |
+|-------------|---------|
+| `SQLITE_ROW` | A new result row is available; call `sqlite3_column_*()` to read it. |
+| `SQLITE_DONE` | The statement has finished executing successfully (no more rows). |
+| `SQLITE_BUSY` | The database is locked; retry after the lock is released. |
+| `SQLITE_ERROR` | A run-time error occurred. Call `sqlite3_errmsg()` for details. |
+| `SQLITE_MISUSE` | The API was called incorrectly (e.g., on a finalized statement). |
+
+For statements prepared with `sqlite3_prepare_v2()` or `sqlite3_prepare_v3()`, specific error codes (e.g., `SQLITE_CONSTRAINT_UNIQUE`) are returned directly instead of the generic `SQLITE_ERROR`.
+
+---
+
+## Resetting and Finalizing
+
+### sqlite3_reset
+
+```c
+int sqlite3_reset(sqlite3_stmt *pStmt);
+```
+
+Resets a prepared statement back to its initial state so it can be re-executed. Existing [bindings are preserved](./binding-values) — call `sqlite3_clear_bindings()` if you need to clear them. The return code reflects the success or failure of the **previous** execution of the statement.
+
+```c
+/* Execute once */
+while (sqlite3_step(stmt) == SQLITE_ROW) { /* ... read row ... */ }
+
+/* Rebind and execute again */
+sqlite3_reset(stmt);
+sqlite3_bind_int(stmt, 1, new_id);
+while (sqlite3_step(stmt) == SQLITE_ROW) { /* ... */ }
+```
+
+<Warning>
+  `sqlite3_reset()` does **not** clear parameter bindings. Always call `sqlite3_clear_bindings()` or rebind all parameters before re-executing if you want to start with fresh values.
+</Warning>
+
+### sqlite3_finalize
+
+```c
+int sqlite3_finalize(sqlite3_stmt *pStmt);
+```
+
+Destroys a prepared statement and releases all associated memory. Must be called exactly once for every successful `sqlite3_prepare_v2()` call. Calling `sqlite3_finalize(NULL)` is a safe no-op.
+
+<Warning>
+  Using a prepared statement after it has been finalized causes undefined behavior including segfaults and heap corruption. Set the pointer to `NULL` after finalization to catch accidental reuse.
+</Warning>
+
+---
+
+## Inspecting a Statement
+
+### SQL Text
+
+```c
+const char *sqlite3_sql(sqlite3_stmt *pStmt);
+char *sqlite3_expanded_sql(sqlite3_stmt *pStmt);
+/* sqlite3_normalized_sql() requires SQLITE_ENABLE_NORMALIZE */
+const char *sqlite3_normalized_sql(sqlite3_stmt *pStmt);
+```
+
+- `sqlite3_sql()` returns the original SQL text used to prepare the statement. The returned pointer is valid until the statement is finalized.
+- `sqlite3_expanded_sql()` returns the SQL with all bound parameters substituted in. The returned string is heap-allocated and **must be freed** with `sqlite3_free()`. Returns `NULL` if insufficient memory or if the result would exceed `SQLITE_LIMIT_LENGTH`.
+- `sqlite3_normalized_sql()` returns a normalized form where literal values are replaced with placeholders (requires the `SQLITE_ENABLE_NORMALIZE` compile option).
+
+### Statement Properties
+
+```c
+int sqlite3_stmt_readonly(sqlite3_stmt *pStmt);
+int sqlite3_stmt_isexplain(sqlite3_stmt *pStmt);
+int sqlite3_stmt_busy(sqlite3_stmt *pStmt);
+```
+
+| Function | Returns |
+|----------|---------|
+| `sqlite3_stmt_readonly(S)` | Non-zero if `S` makes no direct changes to the database file. Note: `BEGIN`, `COMMIT`, `ROLLBACK`, `ATTACH`, and `DETACH` return true even though they affect database state. |
+| `sqlite3_stmt_isexplain(S)` | `1` if `S` is an `EXPLAIN` statement; `2` if it is `EXPLAIN QUERY PLAN`; `0` otherwise. |
+| `sqlite3_stmt_busy(S)` | Non-zero if `S` has been stepped at least once but has not reached `SQLITE_DONE` and has not been reset. |
+
+---
+
+## Reading Result Columns
+
+### sqlite3_column_count and sqlite3_column_name
+
+```c
+int sqlite3_column_count(sqlite3_stmt *pStmt);
+const char *sqlite3_column_name(sqlite3_stmt *pStmt, int N);
+```
+
+`sqlite3_column_count()` returns the number of columns in the result set. `sqlite3_column_name()` returns the name of column `N` (zero-based). The name is the `AS` alias if present, otherwise an implementation-defined string.
+
+### Column Value Functions
+
+After `sqlite3_step()` returns `SQLITE_ROW`, retrieve values with the typed column accessors:
+
+```c
+const void    *sqlite3_column_blob(sqlite3_stmt*, int iCol);
+double         sqlite3_column_double(sqlite3_stmt*, int iCol);
+int            sqlite3_column_int(sqlite3_stmt*, int iCol);
+sqlite3_int64  sqlite3_column_int64(sqlite3_stmt*, int iCol);
+const unsigned char *sqlite3_column_text(sqlite3_stmt*, int iCol);
+int            sqlite3_column_bytes(sqlite3_stmt*, int iCol);
+int            sqlite3_column_type(sqlite3_stmt*, int iCol);
+```
+
+Column indices are **zero-based**. `sqlite3_column_type()` returns one of `SQLITE_INTEGER`, `SQLITE_FLOAT`, `SQLITE_TEXT`, `SQLITE_BLOB`, or `SQLITE_NULL`.
+
+<Note>
+  Column indices for result reading start at **0**, but parameter binding indices start at **1**. This asymmetry is intentional and a common source of off-by-one bugs.
+</Note>
+
+---
+
+## The Full Lifecycle
+
+```c
+sqlite3_stmt *stmt = NULL;
+const char *tail   = NULL;
+int rc;
+
+/* 1. Prepare */
+rc = sqlite3_prepare_v2(
+    db,
+    "SELECT id, name, score FROM leaderboard WHERE score > ? ORDER BY score DESC",
+    -1,
+    &stmt,
+    &tail
+);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Prepare failed: %s\n", sqlite3_errmsg(db));
+    return rc;
+}
+
+/* 2. Bind parameters (column 1, value 1000) */
+sqlite3_bind_int(stmt, 1, 1000);
+
+/* 3. Step through results */
+while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    sqlite3_int64 id    = sqlite3_column_int64(stmt, 0);
+    const char   *name  = (const char *)sqlite3_column_text(stmt, 1);
+    int           score = sqlite3_column_int(stmt, 2);
+    printf("%lld  %-20s  %d\n", (long long)id, name, score);
+}
+
+if (rc != SQLITE_DONE) {
+    fprintf(stderr, "Step error: %s\n", sqlite3_errmsg(db));
+}
+
+/* 4. Reset for another execution with different binding */
+sqlite3_reset(stmt);
+sqlite3_bind_int(stmt, 1, 5000);  /* new threshold */
+
+while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    /* ... process high-score rows ... */
+}
+
+/* 5. Finalize when done */
+sqlite3_finalize(stmt);
+stmt = NULL;
+```
+
+---
+
+## Complete SELECT Loop Example
+
+```c
+#include <sqlite3.h>
+#include <stdio.h>
+
+int query_users(sqlite3 *db, int min_age) {
+    sqlite3_stmt *stmt = NULL;
+    int rc;
+
+    rc = sqlite3_prepare_v2(
+        db,
+        "SELECT id, name, age FROM users WHERE age >= ? ORDER BY age",
+        -1, &stmt, NULL
+    );
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        return rc;
+    }
+
+    sqlite3_bind_int(stmt, 1, min_age);
+
+    printf("Users aged %d+:\n", min_age);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        printf("  id=%-4lld  name=%-20s  age=%d\n",
+               (long long)sqlite3_column_int64(stmt, 0),
+               sqlite3_column_text(stmt, 1),
+               sqlite3_column_int(stmt, 2));
+    }
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "step error: %s\n", sqlite3_errmsg(db));
+    }
+
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE ? SQLITE_OK : rc;
+}
+```
+
+## Compiling Multiple Statements
+
+When a SQL string contains multiple statements, use `pzTail` to iterate:
+
+```c
+const char *sql =
+    "CREATE TABLE a (x INTEGER);"
+    "CREATE TABLE b (y TEXT);"
+    "CREATE INDEX b_idx ON b(y);";
+
+const char *tail = sql;
+while (*tail) {
+    sqlite3_stmt *stmt = NULL;
+    int rc = sqlite3_prepare_v2(db, tail, -1, &stmt, &tail);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        break;
+    }
+    if (stmt == NULL) break;   /* empty statement (e.g., trailing semicolon) */
+
+    rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "step: %s\n", sqlite3_errmsg(db));
+        break;
+    }
+}
+```

@@ -1,47 +1,376 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get Started with SQLite in C"
+sidebarTitle: "Quickstart"
+description: "Learn to embed SQLite in a C application using the amalgamation: open a database, create tables, insert rows, query results, and handle errors end-to-end."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
-
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+Embedding SQLite in a C application takes minutes. Because SQLite ships as the **amalgamation** — a single `sqlite3.c` source file paired with a `sqlite3.h` header — you do not need to install a shared library, run a package manager, or configure a build system. Add two files to your project, compile, and you are done. This guide walks through every step from obtaining the amalgamation to writing a complete, production-quality C program that opens a database, executes DDL and DML statements, and queries results row by row using the prepared-statement API.
 
 ## Prerequisites
 
-Before you begin, you must have:
+- A C compiler (GCC, Clang, or MSVC)
+- The SQLite amalgamation: `sqlite3.c` and `sqlite3.h` (version 3.54.0)
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+Download the amalgamation from the [SQLite download page](https://sqlite.org/download.html) or build it from source:
 
-## Get started
+```bash
+./configure && make sqlite3.c
+```
+
+---
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Obtain the Amalgamation Files
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+Place `sqlite3.c` and `sqlite3.h` alongside your application source. Your project directory should look like this:
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
-</Steps>
+```text
+myproject/
+├── myapp.c      ← your application
+├── sqlite3.c    ← amalgamation implementation
+└── sqlite3.h    ← amalgamation header
+```
+
+<Note>
+  `sqlite3.h` defines the complete public C API. `sqlite3.c` is the entire SQLite engine — roughly 250 000 lines compiled as a single translation unit for best optimisation.
+</Note>
+
+### Compile Your Application
+
+Link `sqlite3.c` directly into your build. On Linux and macOS, the POSIX threading library (`-lpthread`) and the dynamic linker library (`-ldl`) are required:
+
+```bash
+gcc -o myapp myapp.c sqlite3.c -lpthread -ldl
+```
+
+On macOS, `-ldl` is not needed because `dlopen` is part of the system library:
+
+```bash
+clang -o myapp myapp.c sqlite3.c -lpthread
+```
+
+On Windows with MSVC:
+
+```bat
+cl myapp.c sqlite3.c
+```
 
 <Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
+  Add `-O2` for an optimised release build. Compiling the amalgamation as a single translation unit allows the compiler to inline extensively across the entire SQLite engine.
 </Tip>
+
+### Write the Application
+
+Below is a complete, self-contained C program that demonstrates the core SQLite workflow. Read through each section — the subsequent steps explain every API call in detail.
+
+```c
+/* myapp.c — SQLite 3.54.0 quickstart example */
+#include <stdio.h>
+#include <stdlib.h>
+#include "sqlite3.h"
+
+int main(void) {
+    sqlite3      *db     = NULL;
+    sqlite3_stmt *stmt   = NULL;
+    char         *errmsg = NULL;
+    int           rc;
+
+    /* ── Step 1: Open (or create) the database file ── */
+    rc = sqlite3_open("demo.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return EXIT_FAILURE;
+    }
+
+    /* ── Step 2: Create a table ── */
+    const char *ddl =
+        "CREATE TABLE IF NOT EXISTS users ("
+        "  id    INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name  TEXT    NOT NULL,"
+        "  score REAL    NOT NULL"
+        ");";
+
+    rc = sqlite3_exec(db, ddl, NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "SQL error (CREATE TABLE): %s\n", errmsg);
+        sqlite3_free(errmsg);
+        sqlite3_close(db);
+        return EXIT_FAILURE;
+    }
+
+    /* ── Step 3: Insert rows using a prepared statement ── */
+    const char *insert_sql =
+        "INSERT INTO users (name, score) VALUES (?, ?);";
+
+    rc = sqlite3_prepare_v2(db, insert_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Prepare failed (INSERT): %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return EXIT_FAILURE;
+    }
+
+    /* Bind and execute for the first row */
+    sqlite3_bind_text(stmt, 1, "Alice", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 2, 98.5);
+    sqlite3_step(stmt);
+    sqlite3_reset(stmt);   /* reset bindings position, keep statement alive */
+
+    /* Bind and execute for the second row */
+    sqlite3_bind_text(stmt, 1, "Bob", -1, SQLITE_STATIC);
+    sqlite3_bind_double(stmt, 2, 74.0);
+    sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+
+    sqlite3_finalize(stmt);   /* destroy the prepared statement */
+    stmt = NULL;
+
+    /* ── Step 4: Query rows ── */
+    const char *select_sql =
+        "SELECT id, name, score FROM users ORDER BY score DESC;";
+
+    rc = sqlite3_prepare_v2(db, select_sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Prepare failed (SELECT): %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return EXIT_FAILURE;
+    }
+
+    printf("%-4s  %-10s  %s\n", "ID", "Name", "Score");
+    printf("----  ----------  -----\n");
+
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        int         id    = sqlite3_column_int(stmt,    0);
+        const char *name  = (const char *)sqlite3_column_text(stmt,   1);
+        double      score = sqlite3_column_double(stmt, 2);
+        printf("%-4d  %-10s  %.1f\n", id, name, score);
+    }
+
+    if (rc != SQLITE_DONE) {
+        fprintf(stderr, "Query error: %s\n", sqlite3_errmsg(db));
+    }
+
+    /* ── Step 5: Clean up ── */
+    sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    return EXIT_SUCCESS;
+}
+```
+
+### Open the Database with `sqlite3_open()`
+
+`sqlite3_open()` opens an existing database file or creates one if it does not exist. It returns `SQLITE_OK` (integer `0`) on success.
+
+```c
+int sqlite3_open(
+  const char *filename,   /* Database filename (UTF-8) */
+  sqlite3   **ppDb        /* OUT: SQLite db handle */
+);
+```
+
+Always check the return code **and** call `sqlite3_errmsg()` on the handle for a human-readable error string — even if `sqlite3_open()` fails, the handle may be non-NULL and `sqlite3_errmsg()` will still be valid:
+
+```c
+rc = sqlite3_open("demo.db", &db);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Cannot open database: %s\n", sqlite3_errmsg(db));
+    sqlite3_close(db);   /* always close, even on failure */
+}
+```
+
+<Tip>
+  Use `sqlite3_open_v2()` when you need control over flags such as `SQLITE_OPEN_READONLY` (open an existing database read-only) or `SQLITE_OPEN_URI` (interpret the filename as a URI). `sqlite3_open()` is equivalent to calling `sqlite3_open_v2()` with `SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE`.
+</Tip>
+
+### Execute DDL with `sqlite3_exec()`
+
+`sqlite3_exec()` is a convenience wrapper around `sqlite3_prepare_v2()`, `sqlite3_step()`, and `sqlite3_finalize()`. It is ideal for statements that return no rows, such as `CREATE TABLE`, `DROP TABLE`, `BEGIN`, and `COMMIT`.
+
+```c
+int sqlite3_exec(
+  sqlite3                          *db,       /* An open database */
+  const char                       *sql,      /* SQL to be evaluated */
+  int (*callback)(void*,int,char**,char**),   /* Callback for result rows */
+  void                             *pArg,     /* 1st argument to callback */
+  char                            **errmsg    /* Error msg written here */
+);
+```
+
+When an error occurs, the error message is written into memory allocated by SQLite. You **must** free it with `sqlite3_free()` when done:
+
+```c
+rc = sqlite3_exec(db, ddl, NULL, NULL, &errmsg);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "SQL error: %s\n", errmsg);
+    sqlite3_free(errmsg);   /* required — memory leak if omitted */
+}
+```
+
+### Insert Rows with `sqlite3_prepare_v2()` and Parameter Binding
+
+For statements that execute repeatedly or that incorporate runtime values, use the **prepared statement** API. This separates SQL compilation from execution, prevents SQL injection, and is more efficient for repeated execution.
+
+```c
+int sqlite3_prepare_v2(
+  sqlite3      *db,       /* Database handle */
+  const char   *zSql,     /* SQL statement, UTF-8 encoded */
+  int           nByte,    /* Maximum length of zSql in bytes (-1 = NUL-terminated) */
+  sqlite3_stmt **ppStmt,  /* OUT: Statement handle */
+  const char  **pzTail    /* OUT: Pointer to unused portion of zSql */
+);
+```
+
+SQL parameters are placeholders represented by `?`. Bind values to parameters using the `sqlite3_bind_*()` family — parameter indices are **1-based**:
+
+```c
+/* Bind a NUL-terminated UTF-8 string; SQLITE_STATIC means SQLite will NOT
+   copy the string — the caller guarantees it remains valid until the
+   statement is reset or finalized. */
+sqlite3_bind_text(stmt, 1, "Alice", -1, SQLITE_STATIC);
+
+/* Bind a 64-bit IEEE floating-point value. */
+sqlite3_bind_double(stmt, 2, 98.5);
+```
+
+<Warning>
+  Use `SQLITE_TRANSIENT` instead of `SQLITE_STATIC` when the string buffer may be freed or modified before the statement is reset — this tells SQLite to copy the value immediately.
+</Warning>
+
+Execute the statement with `sqlite3_step()`. For non-SELECT statements it returns `SQLITE_DONE` when complete. Call `sqlite3_reset()` to reset the virtual machine for re-execution without re-compiling, and `sqlite3_finalize()` to destroy the statement and reclaim resources:
+
+```c
+sqlite3_step(stmt);      /* SQLITE_DONE for INSERT/UPDATE/DELETE */
+sqlite3_reset(stmt);     /* ready for re-use with new bindings */
+/* ... bind and step again ... */
+sqlite3_finalize(stmt);  /* destroy the prepared statement */
+```
+
+### Query Rows with `sqlite3_step()` and `sqlite3_column_*()`
+
+For `SELECT` statements, call `sqlite3_step()` in a loop. It returns `SQLITE_ROW` each time a new row is available, and `SQLITE_DONE` when the result set is exhausted:
+
+```c
+while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    int         id    = sqlite3_column_int(stmt, 0);           /* column 0 */
+    const char *name  = (const char *)sqlite3_column_text(stmt, 1); /* column 1 */
+    double      score = sqlite3_column_double(stmt, 2);        /* column 2 */
+    printf("%d  %s  %.1f\n", id, name, score);
+}
+if (rc != SQLITE_DONE) {
+    fprintf(stderr, "Query error: %s\n", sqlite3_errmsg(db));
+}
+```
+
+The column accessor functions return values of the appropriate C type. Column indices are **0-based**:
+
+| Function | Return type | Use for |
+|---|---|---|
+| `sqlite3_column_int(stmt, iCol)` | `int` | 32-bit integer columns |
+| `sqlite3_column_int64(stmt, iCol)` | `sqlite3_int64` | 64-bit integer columns |
+| `sqlite3_column_double(stmt, iCol)` | `double` | REAL / floating-point columns |
+| `sqlite3_column_text(stmt, iCol)` | `const unsigned char *` | TEXT columns (UTF-8) |
+| `sqlite3_column_blob(stmt, iCol)` | `const void *` | BLOB columns |
+| `sqlite3_column_bytes(stmt, iCol)` | `int` | Byte length of TEXT or BLOB |
+| `sqlite3_column_type(stmt, iCol)` | `int` | Storage class (`SQLITE_INTEGER`, `SQLITE_FLOAT`, `SQLITE_TEXT`, `SQLITE_BLOB`, `SQLITE_NULL`) |
+
+### Close the Database with `sqlite3_finalize()` and `sqlite3_close()`
+
+Always finalize every prepared statement before closing the database connection. Calling `sqlite3_close()` with outstanding prepared statements returns `SQLITE_BUSY` and leaves the connection open.
+
+```c
+sqlite3_finalize(stmt);  /* must be called before sqlite3_close() */
+sqlite3_close(db);       /* returns SQLITE_OK on success */
+```
+
+</Steps>
+
+---
+
+## Error Handling Reference
+
+Every SQLite API that can fail returns an integer [result code](https://sqlite.org/rescode.html). The most important codes are:
+
+```c
+#define SQLITE_OK     0    /* Successful result */
+#define SQLITE_ERROR  1    /* Generic error */
+#define SQLITE_BUSY   5    /* The database file is locked */
+#define SQLITE_ROW    100  /* sqlite3_step() has another row ready */
+#define SQLITE_DONE   101  /* sqlite3_step() has finished executing */
+```
+
+Use `sqlite3_errmsg()` to retrieve a human-readable description of the most recent error on a database connection:
+
+```c
+const char *sqlite3_errmsg(sqlite3 *db);
+```
+
+Use `sqlite3_errstr()` to convert a numeric result code to an English description without a database connection:
+
+```c
+const char *sqlite3_errstr(int rc);
+/* e.g. sqlite3_errstr(SQLITE_BUSY) → "database is locked" */
+```
+
+---
+
+## Using the `sqlite3` CLI for Interactive Work
+
+The `sqlite3` command-line shell lets you interact with a database without writing any C code — useful for inspecting schemas, running ad-hoc queries, and importing data.
+
+<Tabs>
+  <Tab title="Open / Create a database">
+    ```bash
+    sqlite3 demo.db
+    ```
+  </Tab>
+  <Tab title="Run SQL interactively">
+    ```sql
+    -- Inside the sqlite3 shell:
+    CREATE TABLE IF NOT EXISTS users (
+        id    INTEGER PRIMARY KEY AUTOINCREMENT,
+        name  TEXT    NOT NULL,
+        score REAL    NOT NULL
+    );
+    INSERT INTO users (name, score) VALUES ('Alice', 98.5);
+    SELECT * FROM users;
+    ```
+  </Tab>
+  <Tab title="Useful dot-commands">
+    ```text
+    .tables           -- list all tables
+    .schema users     -- show CREATE statement for a table
+    .mode column      -- aligned column output
+    .headers on       -- show column headers
+    .quit             -- exit the shell
+    ```
+  </Tab>
+  <Tab title="Run a script from the command line">
+    ```bash
+    sqlite3 demo.db < schema.sql
+    sqlite3 demo.db "SELECT * FROM users;"
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Complete Build and Run Example
+
+```bash
+# 1. Place sqlite3.c, sqlite3.h, and myapp.c in the same directory
+# 2. Compile
+gcc -O2 -o myapp myapp.c sqlite3.c -lpthread -ldl
+
+# 3. Run
+./myapp
+```
+
+Expected output:
+
+```text
+ID    Name        Score
+----  ----------  -----
+1     Alice       98.5
+2     Bob         74.0
+```

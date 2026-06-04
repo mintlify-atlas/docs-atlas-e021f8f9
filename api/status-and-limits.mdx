@@ -1,0 +1,299 @@
+---
+title: "Database Status, Limits, and Diagnostic Functions"
+sidebarTitle: "Status & Limits"
+description: "Monitor SQLite memory usage, query library and connection status, enforce runtime limits, and inspect row counts and error information with diagnostic APIs."
+---
+
+SQLite exposes a rich set of diagnostic and introspection functions that let you observe what the library is doing and enforce operational guardrails. These fall into four categories: runtime limits that cap query complexity, memory statistics for tracking allocation behavior, status functions for library-wide and per-connection metrics, and row-count and error functions for post-execution inspection. Together they provide the visibility needed to build reliable, resource-aware applications.
+
+## Runtime Limits
+
+`sqlite3_limit()` lets you lower (but not raise above compile-time maximums) various per-connection resource limits at runtime. This is especially useful for sandboxing untrusted SQL.
+
+```c
+int sqlite3_limit(sqlite3 *db, int id, int newVal);
+```
+
+The function returns the **prior** value of the limit, making it easy to save and restore. To query the current value without changing it, pass `-1` as `newVal`.
+
+```c
+/* Query the current SQL length limit */
+int current = sqlite3_limit(db, SQLITE_LIMIT_SQL_LENGTH, -1);
+
+/* Lower it for an untrusted connection */
+int old = sqlite3_limit(db, SQLITE_LIMIT_SQL_LENGTH, 4096);
+printf("Old SQL length limit: %d\n", old);
+```
+
+<Warning>
+  Attempting to raise a limit above its compile-time hard maximum is silently ignored — the value is truncated to the maximum. You can only lower limits, not raise them above their compiled ceiling.
+</Warning>
+
+### SQLITE_LIMIT_* Constants
+
+| Constant | Value | Controls |
+|----------|-------|---------|
+| `SQLITE_LIMIT_LENGTH` | 0 | Maximum size in bytes of any string, BLOB, or table row |
+| `SQLITE_LIMIT_SQL_LENGTH` | 1 | Maximum length in bytes of a single SQL statement |
+| `SQLITE_LIMIT_COLUMN` | 2 | Maximum number of columns in a table definition, SELECT result set, index, ORDER BY, or GROUP BY clause |
+| `SQLITE_LIMIT_EXPR_DEPTH` | 3 | Maximum depth of expression parse trees |
+| `SQLITE_LIMIT_COMPOUND_SELECT` | 4 | Maximum number of terms in a compound SELECT (UNION, INTERSECT, EXCEPT) |
+| `SQLITE_LIMIT_VDBE_OP` | 5 | Maximum number of instructions in a compiled virtual machine program |
+| `SQLITE_LIMIT_FUNCTION_ARG` | 6 | Maximum number of arguments to a SQL function |
+| `SQLITE_LIMIT_ATTACHED` | 7 | Maximum number of attached databases |
+| `SQLITE_LIMIT_LIKE_PATTERN_LENGTH` | 8 | Maximum length of the pattern argument to LIKE or GLOB |
+| `SQLITE_LIMIT_VARIABLE_NUMBER` | 9 | Maximum index number of any parameter (e.g., `?999`) |
+| `SQLITE_LIMIT_TRIGGER_DEPTH` | 10 | Maximum depth of trigger recursion |
+| `SQLITE_LIMIT_WORKER_THREADS` | 11 | Maximum number of auxiliary worker threads a single prepared statement may start |
+| `SQLITE_LIMIT_PARSER_DEPTH` | 12 | Maximum depth of the LALR(1) parser stack |
+
+---
+
+## Memory Statistics
+
+### sqlite3_memory_used
+
+```c
+sqlite3_int64 sqlite3_memory_used(void);
+```
+
+Returns the total number of bytes of memory currently outstanding — allocated by SQLite via `sqlite3_malloc()` and not yet freed. This is a library-wide (not per-connection) measurement that includes both application-level and internal SQLite allocations.
+
+<Note>
+  `sqlite3_memory_used()` is only operational when `SQLITE_CONFIG_MEMSTATUS` is enabled (the default). If memory status tracking has been disabled for performance, this function returns 0.
+</Note>
+
+### sqlite3_memory_highwater
+
+```c
+sqlite3_int64 sqlite3_memory_highwater(int resetFlag);
+```
+
+Returns the maximum value that `sqlite3_memory_used()` has reached since the high-water mark was last reset. If `resetFlag` is true, the high-water mark is reset to the current value of `sqlite3_memory_used()` and the **prior** high-water value is returned.
+
+```c
+/* Check peak memory without resetting */
+sqlite3_int64 peak = sqlite3_memory_highwater(0);
+printf("Peak memory: %lld bytes\n", (long long)peak);
+
+/* Reset the high-water mark */
+sqlite3_int64 old_peak = sqlite3_memory_highwater(1);
+printf("Previous peak was: %lld bytes\n", (long long)old_peak);
+```
+
+---
+
+## Library-Level Status
+
+### sqlite3_status and sqlite3_status64
+
+```c
+int sqlite3_status(int op, int *pCurrent, int *pHighwater, int resetFlag);
+
+int sqlite3_status64(
+  int op,
+  sqlite3_int64 *pCurrent,
+  sqlite3_int64 *pHighwater,
+  int resetFlag
+);
+```
+
+Query library-wide runtime statistics. `sqlite3_status64()` is preferred when values may exceed 2,147,483,647. Both return `SQLITE_OK` on success.
+
+<ParamField path="op" type="int" required>
+  One of the `SQLITE_STATUS_*` constants selecting what to measure.
+</ParamField>
+
+<ParamField path="pCurrent" type="int *" required>
+  Receives the current value of the statistic. For highwater-only parameters, the written value is undefined.
+</ParamField>
+
+<ParamField path="pHighwater" type="int *" required>
+  Receives the peak (highest instantaneous) value since the last reset (or library start). For current-only parameters, this is undefined.
+</ParamField>
+
+<ParamField path="resetFlag" type="int" required>
+  If non-zero, the high-water mark is reset to the current value after being read.
+</ParamField>
+
+Common `SQLITE_STATUS_*` constants:
+
+| Constant | Measures |
+|----------|---------|
+| `SQLITE_STATUS_MEMORY_USED` | Bytes of memory currently checked out |
+| `SQLITE_STATUS_MALLOC_SIZE` | Largest single allocation request (highwater only) |
+| `SQLITE_STATUS_MALLOC_COUNT` | Number of separate allocations currently outstanding |
+| `SQLITE_STATUS_PAGECACHE_USED` | Pages used from the page cache pool |
+| `SQLITE_STATUS_PAGECACHE_OVERFLOW` | Bytes of page cache that overflowed to `sqlite3_malloc()` |
+| `SQLITE_STATUS_PAGECACHE_SIZE` | Largest page cache allocation request (highwater only) |
+| `SQLITE_STATUS_PARSER_STACK` | Deepest parser stack depth (highwater only, requires `YYTRACKMAXSTACKDEPTH`) |
+
+```c
+int current, highwater;
+sqlite3_status(SQLITE_STATUS_MEMORY_USED, &current, &highwater, 0);
+printf("Memory in use: %d bytes, peak: %d bytes\n", current, highwater);
+```
+
+---
+
+## Per-Connection Status
+
+### sqlite3_db_status and sqlite3_db_status64
+
+```c
+int sqlite3_db_status(sqlite3 *db, int op, int *pCur, int *pHiwtr, int resetFlg);
+int sqlite3_db_status64(sqlite3 *db, int op,
+                        sqlite3_int64 *pCur, sqlite3_int64 *pHiwtr, int resetFlg);
+```
+
+Query runtime statistics for a specific database connection. The API mirrors `sqlite3_status()` but scoped to one connection.
+
+```c
+int cur, hi;
+sqlite3_db_status(db, SQLITE_DBSTATUS_LOOKASIDE_USED, &cur, &hi, 0);
+printf("Lookaside slots in use: %d, peak: %d\n", cur, hi);
+```
+
+---
+
+## Row and Change Counts
+
+### sqlite3_last_insert_rowid
+
+```c
+sqlite3_int64 sqlite3_last_insert_rowid(sqlite3 *db);
+```
+
+Returns the rowid of the most recent successful `INSERT` into a rowid table on this connection. Returns `0` if no successful insert has ever occurred. The value is connection-specific and not affected by inserts on other connections.
+
+### sqlite3_set_last_insert_rowid
+
+```c
+void sqlite3_set_last_insert_rowid(sqlite3 *db, sqlite3_int64 rowid);
+```
+
+Manually sets the value returned by `sqlite3_last_insert_rowid()` without inserting a row. Useful in trigger implementations or virtual table code.
+
+### sqlite3_changes and sqlite3_changes64
+
+```c
+int sqlite3_changes(sqlite3 *db);
+sqlite3_int64 sqlite3_changes64(sqlite3 *db);
+```
+
+Return the number of rows modified, inserted, or deleted by the most recently completed `INSERT`, `UPDATE`, or `DELETE` statement. Auxiliary changes from triggers, foreign key actions, or `REPLACE` constraint resolution are **not** counted.
+
+```c
+sqlite3_exec(db, "DELETE FROM users WHERE active = 0", NULL, NULL, NULL);
+printf("Deleted %d inactive users\n", sqlite3_changes(db));
+```
+
+### sqlite3_total_changes and sqlite3_total_changes64
+
+```c
+int sqlite3_total_changes(sqlite3 *db);
+sqlite3_int64 sqlite3_total_changes64(sqlite3 *db);
+```
+
+Return the total number of rows inserted, modified, or deleted by all `INSERT`, `UPDATE`, and `DELETE` statements completed since the database connection was opened, including those executed as part of trigger programs.
+
+---
+
+## Error Information
+
+### sqlite3_errcode and sqlite3_extended_errcode
+
+```c
+int sqlite3_errcode(sqlite3 *db);
+int sqlite3_extended_errcode(sqlite3 *db);
+```
+
+Return the numeric result code for the most recent API call on `db`. `sqlite3_errcode()` returns the primary result code (e.g., `SQLITE_CONSTRAINT`). `sqlite3_extended_errcode()` always returns the extended code (e.g., `SQLITE_CONSTRAINT_UNIQUE`) even when extended codes are not globally enabled.
+
+### sqlite3_errmsg
+
+```c
+const char *sqlite3_errmsg(sqlite3 *db);
+```
+
+Returns an English-language description of the most recent error as a UTF-8 string. The memory is managed internally and may be overwritten by subsequent SQLite calls. Do not free the returned pointer.
+
+### sqlite3_errstr
+
+```c
+const char *sqlite3_errstr(int errcode);
+```
+
+Returns a static English string describing result code `errcode`. Useful for converting bare error codes to human-readable messages without a database connection.
+
+### sqlite3_error_offset
+
+```c
+int sqlite3_error_offset(sqlite3 *db);
+```
+
+If the most recent error references a specific token in the input SQL, returns the byte offset (UTF-8) of the start of that token. Returns `-1` if the error does not reference a specific position.
+
+```c
+rc = sqlite3_exec(db, bad_sql, NULL, NULL, NULL);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Error %d at offset %d: %s\n",
+            sqlite3_extended_errcode(db),
+            sqlite3_error_offset(db),
+            sqlite3_errmsg(db));
+}
+```
+
+---
+
+## Read-Only Database Check
+
+```c
+int sqlite3_db_readonly(sqlite3 *db, const char *zDbName);
+```
+
+Returns:
+- `1` if database `zDbName` on connection `db` is read-only
+- `0` if it is read/write
+- `-1` if `zDbName` is not the name of a database attached to `db`
+
+```c
+if (sqlite3_db_readonly(db, "main") == 1) {
+    printf("Database is read-only\n");
+}
+```
+
+This is useful when you open with `SQLITE_OPEN_READWRITE` but the OS may have downgraded the connection to read-only silently.
+
+---
+
+## Putting It Together
+
+```c
+#include <sqlite3.h>
+#include <stdio.h>
+
+void print_diagnostics(sqlite3 *db) {
+    /* Memory */
+    printf("Memory in use:    %lld bytes\n",
+           (long long)sqlite3_memory_used());
+    printf("Memory peak:      %lld bytes\n",
+           (long long)sqlite3_memory_highwater(0));
+
+    /* Changes since connection opened */
+    printf("Total changes:    %lld\n",
+           (long long)sqlite3_total_changes64(db));
+
+    /* Last insert */
+    printf("Last insert rowid: %lld\n",
+           (long long)sqlite3_last_insert_rowid(db));
+
+    /* Limits (query current SQL length limit) */
+    int sql_limit = sqlite3_limit(db, SQLITE_LIMIT_SQL_LENGTH, -1);
+    printf("SQL length limit:  %d bytes\n", sql_limit);
+
+    /* Read-only? */
+    printf("Main DB read-only: %s\n",
+           sqlite3_db_readonly(db, "main") ? "yes" : "no");
+}
+```

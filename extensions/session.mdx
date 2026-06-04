@@ -1,0 +1,284 @@
+---
+title: "Session Extension: Track and Replay Database Changes"
+sidebarTitle: "Session"
+description: "Record INSERT, UPDATE, and DELETE operations as binary changesets with the Session extension, then apply, invert, or rebase them for sync and undo/redo workflows."
+---
+
+The Session extension captures every INSERT, UPDATE, and DELETE made to a set of tables and encodes them into a compact binary format called a **changeset** (or **patchset**). A changeset can be transmitted to another database, applied to bring it up to date, inverted to undo changes, or rebased to resolve conflicts between concurrent edits. Common use cases include database synchronisation, undo/redo stacks, and audit logging.
+
+The Session extension lives in `ext/session/` and its public API is declared in `ext/session/sqlite3session.h`. It is compiled in by defining both `-DSQLITE_ENABLE_SESSION` and `-DSQLITE_ENABLE_PREUPDATE_HOOK`.
+
+## Compile-Time Requirements
+
+```bash
+gcc -DSQLITE_ENABLE_SESSION \
+    -DSQLITE_ENABLE_PREUPDATE_HOOK \
+    -o myapp myapp.c sqlite3.c
+```
+
+<Warning>
+  Both flags are required. The Session extension internally uses the
+  pre-update hook API (`sqlite3_preupdate_hook`), which is compiled out by
+  default and must be explicitly enabled with `SQLITE_ENABLE_PREUPDATE_HOOK`.
+</Warning>
+
+## Core Concepts
+
+| Term | Meaning |
+|---|---|
+| **Session object** | Attached to a database connection; records changes to specified tables |
+| **Changeset** | Binary blob encoding INSERT/UPDATE/DELETE operations, with old and new values |
+| **Patchset** | A compact variant of a changeset; DELETE records contain only primary key columns |
+| **Changeset iterator** | Cursor used to walk through individual change records |
+
+Tables must have an explicit `PRIMARY KEY` to be tracked. Tables without a primary key are silently ignored.
+
+## Creating and Using a Session Object
+
+<Steps>
+  <Step title="Create the session">
+    Call `sqlite3session_create()` to create a session attached to a database handle and a named database schema (usually `"main"`):
+
+    ```c
+    sqlite3_session *pSession = NULL;
+    int rc = sqlite3session_create(db, "main", &pSession);
+    if (rc != SQLITE_OK) { /* handle error */ }
+    ```
+  </Step>
+  <Step title="Attach tables to track">
+    Call `sqlite3session_attach()` to specify which tables to monitor. Pass `NULL` to track all tables:
+
+    ```c
+    /* Track a specific table */
+    sqlite3session_attach(pSession, "employees");
+
+    /* Track all tables in the schema */
+    sqlite3session_attach(pSession, NULL);
+    ```
+  </Step>
+  <Step title="Perform database operations">
+    Execute normal SQL statements. The session records all changes made to attached tables while it is enabled:
+
+    ```c
+    sqlite3_exec(db, "INSERT INTO employees(id, name, salary) VALUES(1, 'Alice', 90000)", 0, 0, 0);
+    sqlite3_exec(db, "UPDATE employees SET salary = 95000 WHERE id = 1", 0, 0, 0);
+    sqlite3_exec(db, "DELETE FROM employees WHERE id = 2", 0, 0, 0);
+    ```
+  </Step>
+  <Step title="Generate the changeset">
+    Call `sqlite3session_changeset()` to serialise all recorded changes into a binary blob:
+
+    ```c
+    int   nChangeset = 0;
+    void *pChangeset = NULL;
+    rc = sqlite3session_changeset(pSession, &nChangeset, &pChangeset);
+    if (rc != SQLITE_OK) { /* handle error */ }
+    /* pChangeset now points to nChangeset bytes of changeset data */
+    ```
+
+    Use `sqlite3session_patchset()` instead to produce a more compact patchset (DELETE records contain primary key columns only):
+
+    ```c
+    int   nPatchset = 0;
+    void *pPatchset = NULL;
+    rc = sqlite3session_patchset(pSession, &nPatchset, &pPatchset);
+    ```
+  </Step>
+  <Step title="Clean up">
+    Free the changeset buffer and delete the session object:
+
+    ```c
+    sqlite3_free(pChangeset);
+    sqlite3session_delete(pSession);
+    ```
+  </Step>
+</Steps>
+
+## Enabling and Disabling Recording
+
+A newly created session is enabled by default. You can pause and resume recording:
+
+```c
+/* Pause recording (returns 0 = disabled) */
+sqlite3session_enable(pSession, 0);
+
+/* Resume recording (returns 1 = enabled) */
+sqlite3session_enable(pSession, 1);
+
+/* Query current state without changing it */
+int isEnabled = sqlite3session_enable(pSession, -1);
+```
+
+## Applying a Changeset
+
+`sqlite3changeset_apply()` applies a changeset to the `"main"` database of a connection. You provide two callbacks: an optional table filter and a mandatory conflict handler.
+
+```c
+static int conflict_handler(
+  void *pCtx,
+  int eConflict,                /* SQLITE_CHANGESET_DATA, _MISSING, _CONFLICT, _CONSTRAINT, _FOREIGN_KEY */
+  sqlite3_changeset_iter *pIter
+) {
+  /* Return one of:
+  **   SQLITE_CHANGESET_OMIT    -- skip this change
+  **   SQLITE_CHANGESET_REPLACE -- overwrite conflicting row (INSERT/UPDATE conflicts only)
+  **   SQLITE_CHANGESET_ABORT   -- abort and roll back the entire apply
+  */
+  return SQLITE_CHANGESET_OMIT;
+}
+
+int rc = sqlite3changeset_apply(
+  db,           /* Target database */
+  nChangeset,   /* Size of changeset in bytes */
+  pChangeset,   /* Pointer to changeset blob */
+  NULL,         /* Optional table filter callback */
+  conflict_handler,
+  NULL          /* User data passed to callbacks */
+);
+```
+
+<Accordion title="Conflict types passed to the conflict handler">
+  | Constant | Meaning |
+  |---|---|
+  | `SQLITE_CHANGESET_DATA` | An UPDATE or DELETE but the current row values differ from the expected old values |
+  | `SQLITE_CHANGESET_MISSING` | A DELETE or UPDATE but no row with the given primary key exists |
+  | `SQLITE_CHANGESET_CONFLICT` | An INSERT but a row with that primary key already exists |
+  | `SQLITE_CHANGESET_CONSTRAINT` | A constraint violation (UNIQUE, NOT NULL, etc.) |
+  | `SQLITE_CHANGESET_FOREIGN_KEY` | A foreign-key violation after the changeset has been applied |
+</Accordion>
+
+## Inverting a Changeset
+
+`sqlite3changeset_invert()` produces a new changeset that is the logical inverse of the input: INSERTs become DELETEs, DELETEs become INSERTs, and UPDATEs swap their old and new values. Applying an inverted changeset undoes the original changes.
+
+```c
+int   nInverse = 0;
+void *pInverse = NULL;
+
+int rc = sqlite3changeset_invert(
+  nChangeset, pChangeset,   /* Input */
+  &nInverse,  &pInverse     /* Output */
+);
+
+/* Apply the inverse to undo the original changeset */
+rc = sqlite3changeset_apply(db, nInverse, pInverse, NULL, conflict_handler, NULL);
+
+sqlite3_free(pInverse);
+```
+
+## Iterating Through a Changeset
+
+You can inspect individual change records using a changeset iterator:
+
+```c
+sqlite3_changeset_iter *pIter = NULL;
+sqlite3changeset_start(&pIter, nChangeset, pChangeset);
+
+while (sqlite3changeset_next(pIter) == SQLITE_ROW) {
+  const char *zTab;
+  int nCol, op, bIndirect;
+
+  sqlite3changeset_op(pIter, &zTab, &nCol, &op, &bIndirect);
+
+  if (op == SQLITE_INSERT) {
+    sqlite3_value *pNew;
+    sqlite3changeset_new(pIter, 0, &pNew); /* Column 0 new value */
+    printf("INSERT into %s: first col = %s\n",
+           zTab, sqlite3_value_text(pNew));
+  } else if (op == SQLITE_DELETE) {
+    sqlite3_value *pOld;
+    sqlite3changeset_old(pIter, 0, &pOld); /* Column 0 old value */
+    printf("DELETE from %s: first col was = %s\n",
+           zTab, sqlite3_value_text(pOld));
+  } else if (op == SQLITE_UPDATE) {
+    sqlite3_value *pOld, *pNew;
+    sqlite3changeset_old(pIter, 0, &pOld);
+    sqlite3changeset_new(pIter, 0, &pNew);
+    printf("UPDATE %s: col0 %s -> %s\n",
+           zTab,
+           sqlite3_value_text(pOld),
+           sqlite3_value_text(pNew));
+  }
+}
+
+sqlite3changeset_finalize(pIter);
+```
+
+## Concatenating Changesets
+
+Two changesets can be merged into a single, equivalent changeset using `sqlite3changeset_concat()`. The result represents applying changeset A followed by changeset B:
+
+```c
+int   nOut = 0;
+void *pOut = NULL;
+
+sqlite3changeset_concat(
+  nA, pA,   /* First changeset */
+  nB, pB,   /* Second changeset */
+  &nOut, &pOut
+);
+/* pOut contains the merged changeset */
+sqlite3_free(pOut);
+```
+
+## Rebaser API: Three-Way Merge
+
+When two clients each record local changesets against the same base database and one client's changes are applied to the server first, the second client's changeset may conflict with the already-applied changes. The **Rebaser** API resolves this by rebasing the local changeset against the conflict-resolution decisions made during the remote apply.
+
+```c
+/* Step 1: Apply the remote changeset using apply_v2(), capturing rebase data */
+void *pRebase  = NULL;
+int   nRebase  = 0;
+
+sqlite3changeset_apply_v2(
+  db,
+  nRemote, pRemote,
+  NULL, conflict_handler, NULL,
+  &pRebase, &nRebase,   /* Captured rebase information */
+  0
+);
+
+/* Step 2: Create a rebaser and configure it */
+sqlite3_rebaser *pRebaser = NULL;
+sqlite3rebaser_create(&pRebaser);
+sqlite3rebaser_configure(pRebaser, nRebase, pRebase);
+
+/* Step 3: Rebase the local changeset */
+int   nRebased = 0;
+void *pRebased = NULL;
+sqlite3rebaser_rebase(pRebaser, nLocal, pLocal, &nRebased, &pRebased);
+
+/* Step 4: Apply the rebased local changeset */
+sqlite3changeset_apply(db, nRebased, pRebased, NULL, conflict_handler, NULL);
+
+/* Cleanup */
+sqlite3_free(pRebased);
+sqlite3_free(pRebase);
+sqlite3rebaser_delete(pRebaser);
+```
+
+<Note>
+  The Rebaser API is marked **experimental** in the SQLite source and may change
+  in future releases.
+</Note>
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="Database Sync" icon="arrows-rotate">
+    Record changes on a mobile device, transmit the changeset to a server, and
+    apply it. Use the rebaser to handle concurrent edits from multiple clients.
+  </Card>
+  <Card title="Undo / Redo" icon="rotate-left">
+    Capture a changeset before each user action and store it in an undo stack.
+    Invert the changeset to undo; re-apply the original to redo.
+  </Card>
+  <Card title="Audit Log" icon="clipboard-list">
+    Iterate the changeset after each transaction and write a structured log of
+    every INSERT, UPDATE, and DELETE with their old and new values.
+  </Card>
+  <Card title="Replication" icon="copy">
+    Fan out changesets from a primary to multiple replica databases, applying
+    each changeset in order to keep replicas consistent with the primary.
+  </Card>
+</CardGroup>

@@ -1,0 +1,300 @@
+---
+title: "Virtual File System (VFS): Custom Storage Backends"
+sidebarTitle: "VFS"
+description: "Understand SQLite's OS interface abstraction layer and learn to register, find, and author custom VFS implementations for embedded and specialized storage."
+---
+
+Every SQLite build sits on top of an abstraction layer called the **Virtual File System** (VFS). The VFS shields the SQLite core from any knowledge of the underlying operating system: it handles file opens, reads, writes, locks, directory operations, and even random-number generation. By swapping out or stacking VFS implementations you can redirect SQLite's storage to encrypted containers, network block devices, in-memory buffers, or any other medium — without touching a single line of the core engine.
+
+## The `sqlite3_vfs` Structure
+
+An `sqlite3_vfs` object is a vtable filled with function pointers. Each registered VFS has a unique name; SQLite keeps all registered VFSes on a linked list ordered by priority.
+
+```c
+typedef struct sqlite3_vfs sqlite3_vfs;
+struct sqlite3_vfs {
+  int iVersion;            /* Structure version (currently 3) */
+  int szOsFile;            /* sizeof the subclassed sqlite3_file object */
+  int mxPathname;          /* Maximum full-path length in bytes */
+  sqlite3_vfs *pNext;      /* Next registered VFS (managed by SQLite) */
+  const char *zName;       /* Unique VFS name */
+  void *pAppData;          /* Application-specific pointer */
+
+  /* ── Version 1 methods ────────────────────────────────────────────── */
+  int (*xOpen)(sqlite3_vfs*, sqlite3_filename zName, sqlite3_file*,
+               int flags, int *pOutFlags);
+  int (*xDelete)(sqlite3_vfs*, const char *zName, int syncDir);
+  int (*xAccess)(sqlite3_vfs*, const char *zName, int flags, int *pResOut);
+  int (*xFullPathname)(sqlite3_vfs*, const char *zName, int nOut, char *zOut);
+  void *(*xDlOpen)(sqlite3_vfs*, const char *zFilename);
+  void  (*xDlError)(sqlite3_vfs*, int nByte, char *zErrMsg);
+  void (*(*xDlSym)(sqlite3_vfs*, void*, const char *zSymbol))(void);
+  void  (*xDlClose)(sqlite3_vfs*, void*);
+  int   (*xRandomness)(sqlite3_vfs*, int nByte, char *zOut);
+  int   (*xSleep)(sqlite3_vfs*, int microseconds);
+  int   (*xCurrentTime)(sqlite3_vfs*, double*);
+  int   (*xGetLastError)(sqlite3_vfs*, int, char *);
+
+  /* ── Version 2 additions ──────────────────────────────────────────── */
+  int   (*xCurrentTimeInt64)(sqlite3_vfs*, sqlite3_int64*);
+
+  /* ── Version 3 additions ──────────────────────────────────────────── */
+  int   (*xSetSystemCall)(sqlite3_vfs*, const char *zName, sqlite3_syscall_ptr);
+  sqlite3_syscall_ptr (*xGetSystemCall)(sqlite3_vfs*, const char *zName);
+  const char *(*xNextSystemCall)(sqlite3_vfs*, const char *zName);
+};
+```
+
+<Expandable title="Key VFS method descriptions">
+  | Method | Purpose |
+  |---|---|
+  | `xOpen` | Opens or creates a file; populates an `sqlite3_file` object |
+  | `xDelete` | Deletes a file by name |
+  | `xAccess` | Tests file existence (`SQLITE_ACCESS_EXISTS`) or readability/writability |
+  | `xFullPathname` | Converts a relative path to an absolute one |
+  | `xDlOpen` / `xDlError` / `xDlSym` / `xDlClose` | Dynamic-library loading (for auto-extension loading) |
+  | `xRandomness` | Fills a buffer with `nByte` random bytes |
+  | `xSleep` | Sleeps for at least `microseconds` microseconds |
+  | `xCurrentTime` | Returns the current Julian Day Number as a `double` |
+  | `xCurrentTimeInt64` | Returns Julian Day × 86,400,000 as an integer (preferred over `xCurrentTime`) |
+  | `xGetLastError` | Returns a human-readable OS error string |
+</Expandable>
+
+## The `sqlite3_file` and `sqlite3_io_methods` Structures
+
+When `xOpen` succeeds it must fill in the `sqlite3_file.pMethods` field with a pointer to an `sqlite3_io_methods` vtable. This vtable defines the per-file I/O operations:
+
+```c
+struct sqlite3_file {
+  const struct sqlite3_io_methods *pMethods;
+};
+
+struct sqlite3_io_methods {
+  int iVersion;
+  int (*xClose)(sqlite3_file*);
+  int (*xRead)(sqlite3_file*, void*, int iAmt, sqlite3_int64 iOfst);
+  int (*xWrite)(sqlite3_file*, const void*, int iAmt, sqlite3_int64 iOfst);
+  int (*xTruncate)(sqlite3_file*, sqlite3_int64 size);
+  int (*xSync)(sqlite3_file*, int flags);
+  int (*xFileSize)(sqlite3_file*, sqlite3_int64 *pSize);
+  int (*xLock)(sqlite3_file*, int);
+  int (*xUnlock)(sqlite3_file*, int);
+  int (*xCheckReservedLock)(sqlite3_file*, int *pResOut);
+  int (*xFileControl)(sqlite3_file*, int op, void *pArg);
+  int (*xSectorSize)(sqlite3_file*);
+  int (*xDeviceCharacteristics)(sqlite3_file*);
+  /* Version 2+: shared-memory methods for WAL mode */
+  int (*xShmMap)(sqlite3_file*, int iPg, int pgsz, int, void volatile**);
+  int (*xShmLock)(sqlite3_file*, int offset, int n, int flags);
+  void (*xShmBarrier)(sqlite3_file*);
+  int (*xShmUnmap)(sqlite3_file*, int deleteFlag);
+  /* Version 3+: memory-mapped I/O */
+  int (*xFetch)(sqlite3_file*, sqlite3_int64 iOfst, int iAmt, void **pp);
+  int (*xUnfetch)(sqlite3_file*, sqlite3_int64 iOfst, void *p);
+};
+```
+
+<Note>
+  Custom VFS implementations commonly **subclass** `sqlite3_file` by embedding it as the first member of a larger struct, then appending their own per-file state (file descriptor, encryption context, etc.) after it.
+</Note>
+
+Locking levels for `xLock()` and `xUnlock()` progress in this order: `SQLITE_LOCK_NONE` → `SQLITE_LOCK_SHARED` → `SQLITE_LOCK_RESERVED` → `SQLITE_LOCK_PENDING` → `SQLITE_LOCK_EXCLUSIVE`. `xLock()` upgrades; `xUnlock()` downgrades. The locking sequence is critical for SQLite's multi-reader/single-writer concurrency model.
+
+## Registering and Finding VFSes
+
+```c
+sqlite3_vfs *sqlite3_vfs_find(const char *zVfsName);
+int          sqlite3_vfs_register(sqlite3_vfs*, int makeDflt);
+int          sqlite3_vfs_unregister(sqlite3_vfs*);
+```
+
+<ParamField path="zVfsName" type="const char*">
+  UTF-8 name of the VFS to locate. Passing `NULL` returns the current **default** VFS.
+</ParamField>
+
+<ParamField path="makeDflt" type="int">
+  If non-zero, the newly registered VFS becomes the default for all future `sqlite3_open()` calls that do not specify a VFS name.
+</ParamField>
+
+- `sqlite3_vfs_find()` returns `NULL` if no VFS with that name is registered.
+- Registering a VFS with the same name as an existing one results in undefined behavior. Always use a unique name.
+- `sqlite3_vfs_unregister()` removes the VFS from the list. If it was the default, SQLite picks another default arbitrarily.
+
+## Selecting a VFS at Open Time
+
+### Programmatic: `sqlite3_open_v2`
+
+```c
+int sqlite3_open_v2(
+  const char *filename,
+  sqlite3 **ppDb,
+  int flags,
+  const char *zVfs          /* VFS name, or NULL for default */
+);
+```
+
+Pass the VFS name as the last argument:
+
+```c
+sqlite3 *db;
+sqlite3_open_v2("data.db", &db,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                "myvfs");
+```
+
+### URI Parameter
+
+When filenames are URI-encoded (the `SQLITE_OPEN_URI` flag or `PRAGMA` `uri=on`), you can append `?vfs=name`:
+
+```c
+sqlite3_open_v2(
+    "file:data.db?vfs=myvfs",
+    &db,
+    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI,
+    NULL
+);
+```
+
+## Built-in VFS Implementations
+
+| Name | Platform | Notes |
+|---|---|---|
+| `unix` | POSIX | Default on Linux/macOS; uses `fcntl()` locking |
+| `unix-dotfile` | POSIX | Dot-file locking — works on network filesystems |
+| `unix-excl` | POSIX | Holds an exclusive lock for the connection lifetime |
+| `win32` | Windows | Default on Windows |
+| `memdb` | All | Pure in-memory, private to one connection |
+
+<Tip>
+  Use `sqlite3_vfs_find(NULL)` to discover the current default VFS name at runtime, which is useful for writing VFS shims that delegate to the underlying default.
+</Tip>
+
+## When to Write a Custom VFS
+
+Custom VFSes are most useful for:
+
+- **Embedded systems** — redirect storage to a raw flash partition or a ROM image.
+- **Encrypted storage** — transparently encrypt/decrypt pages using AES or similar before writing.
+- **Network storage** — implement locking and I/O over a custom protocol.
+- **Testing and simulation** — inject I/O errors, simulate power failures, or trace all disk activity.
+- **Read-only archives** — serve a SQLite database directly from a ZIP file or firmware image.
+
+## Minimal VFS Skeleton
+
+The example below shows the structural skeleton of a custom VFS. Method bodies are left as stubs returning `SQLITE_OK`; a real implementation replaces them with actual OS calls.
+
+```c
+#include <string.h>
+#include "sqlite3.h"
+
+/* ── Per-file state (subclass of sqlite3_file) ───────────────────────── */
+typedef struct MyFile {
+    sqlite3_file base;   /* MUST be the first member */
+    int fd;              /* OS-level file descriptor */
+} MyFile;
+
+/* ── I/O method implementations ─────────────────────────────────────── */
+static int my_close(sqlite3_file *pFile) {
+    MyFile *p = (MyFile *)pFile;
+    /* close(p->fd); */
+    return SQLITE_OK;
+}
+static int my_read(sqlite3_file *pFile, void *buf,
+                   int iAmt, sqlite3_int64 iOfst) {
+    /* pread(((MyFile*)pFile)->fd, buf, iAmt, iOfst); */
+    return SQLITE_OK;
+}
+static int my_write(sqlite3_file *pFile, const void *buf,
+                    int iAmt, sqlite3_int64 iOfst) {
+    /* pwrite(((MyFile*)pFile)->fd, buf, iAmt, iOfst); */
+    return SQLITE_OK;
+}
+static int my_truncate(sqlite3_file *pFile, sqlite3_int64 size)
+    { return SQLITE_OK; }
+static int my_sync(sqlite3_file *pFile, int flags)
+    { return SQLITE_OK; }
+static int my_file_size(sqlite3_file *pFile, sqlite3_int64 *pSize)
+    { *pSize = 0; return SQLITE_OK; }
+static int my_lock(sqlite3_file *pFile, int eLock)   { return SQLITE_OK; }
+static int my_unlock(sqlite3_file *pFile, int eLock) { return SQLITE_OK; }
+static int my_check_reserved_lock(sqlite3_file *pFile, int *pResOut)
+    { *pResOut = 0; return SQLITE_OK; }
+static int my_file_control(sqlite3_file *pFile, int op, void *pArg)
+    { return SQLITE_NOTFOUND; }
+static int my_sector_size(sqlite3_file *pFile)
+    { return 4096; }
+static int my_device_characteristics(sqlite3_file *pFile)
+    { return 0; }
+
+static const sqlite3_io_methods my_io_methods = {
+    1,                          /* iVersion */
+    my_close,
+    my_read,
+    my_write,
+    my_truncate,
+    my_sync,
+    my_file_size,
+    my_lock,
+    my_unlock,
+    my_check_reserved_lock,
+    my_file_control,
+    my_sector_size,
+    my_device_characteristics,
+};
+
+/* ── VFS method implementations ──────────────────────────────────────── */
+static int my_open(sqlite3_vfs *pVfs, sqlite3_filename zName,
+                   sqlite3_file *pFile, int flags, int *pOutFlags) {
+    MyFile *p = (MyFile *)pFile;
+    memset(p, 0, sizeof(*p));
+    p->base.pMethods = &my_io_methods;
+    /* p->fd = open(zName, ...); */
+    return SQLITE_OK;
+}
+static int my_delete(sqlite3_vfs *pVfs, const char *zName, int syncDir)
+    { return SQLITE_OK; }
+static int my_access(sqlite3_vfs *pVfs, const char *zName,
+                     int flags, int *pResOut)
+    { *pResOut = 0; return SQLITE_OK; }
+static int my_full_pathname(sqlite3_vfs *pVfs, const char *zIn,
+                             int nOut, char *zOut) {
+    sqlite3_snprintf(nOut, zOut, "%s", zIn);
+    return SQLITE_OK;
+}
+static int my_randomness(sqlite3_vfs *pVfs, int nByte, char *zOut)
+    { memset(zOut, 0, nByte); return nByte; }
+static int my_sleep(sqlite3_vfs *pVfs, int microseconds)
+    { return microseconds; }
+static int my_current_time(sqlite3_vfs *pVfs, double *pTime)
+    { *pTime = 0.0; return SQLITE_OK; }
+static int my_get_last_error(sqlite3_vfs *pVfs, int n, char *z)
+    { return 0; }
+
+/* ── VFS descriptor ──────────────────────────────────────────────────── */
+static sqlite3_vfs my_vfs = {
+    1,                    /* iVersion */
+    sizeof(MyFile),       /* szOsFile  — MUST match your MyFile struct */
+    256,                  /* mxPathname */
+    NULL,                 /* pNext (managed by SQLite) */
+    "myvfs",              /* zName — must be unique */
+    NULL,                 /* pAppData */
+    my_open,
+    my_delete,
+    my_access,
+    my_full_pathname,
+    NULL, NULL, NULL, NULL,   /* xDlOpen, xDlError, xDlSym, xDlClose */
+    my_randomness,
+    my_sleep,
+    my_current_time,
+    my_get_last_error,
+};
+
+/* ── Register on startup ─────────────────────────────────────────────── */
+int register_my_vfs(void) {
+    return sqlite3_vfs_register(&my_vfs, /*makeDflt=*/0);
+}
+```
+
+<Warning>
+  The `szOsFile` field must equal `sizeof(MyFile)` — the **subclassed** size, not `sizeof(sqlite3_file)`. SQLite allocates exactly `szOsFile` bytes for the file object passed to `xOpen`. Underestimating this value causes memory corruption.
+</Warning>

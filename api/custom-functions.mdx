@@ -1,0 +1,284 @@
+---
+title: "Creating Custom SQL Functions with SQLite C API"
+sidebarTitle: "Custom Functions"
+description: "Learn how to register scalar, aggregate, and window SQL functions in SQLite using sqlite3_create_function_v2 and sqlite3_create_window_function."
+---
+
+SQLite allows applications to extend SQL with their own functions written in C. These application-defined functions behave exactly like built-in functions — they can be called from any SQL statement, used in `WHERE` clauses, `ORDER BY` expressions, or as arguments to other functions. A scalar function maps `N` inputs to one output; an aggregate function accumulates state across rows and emits a single result per group; a window function additionally supports the `OVER` clause.
+
+## Registering a Function: `sqlite3_create_function_v2`
+
+```c
+int sqlite3_create_function_v2(
+  sqlite3 *db,
+  const char *zFunctionName,
+  int nArg,
+  int eTextRep,
+  void *pApp,
+  void (*xFunc)(sqlite3_context*, int, sqlite3_value**),
+  void (*xStep)(sqlite3_context*, int, sqlite3_value**),
+  void (*xFinal)(sqlite3_context*),
+  void (*xDestroy)(void*)
+);
+```
+
+<ParamField path="db" type="sqlite3*" required>
+  The open database connection on which the function will be registered. The function is only visible to this connection.
+</ParamField>
+
+<ParamField path="zFunctionName" type="const char*" required>
+  UTF-8 name of the SQL function. Case-insensitive. Must not exceed 255 bytes.
+</ParamField>
+
+<ParamField path="nArg" type="int" required>
+  Number of arguments the function accepts. Pass `-1` to accept any number of arguments. A non-negative value is a better match than `-1` when SQLite picks among multiple registrations with the same name.
+</ParamField>
+
+<ParamField path="eTextRep" type="int" required>
+  Preferred text encoding ORed with optional function flags (see below). Must include at least one encoding flag.
+</ParamField>
+
+<ParamField path="pApp" type="void*">
+  An arbitrary application pointer passed back to the function via `sqlite3_user_data()`. May be `NULL`.
+</ParamField>
+
+<ParamField path="xFunc" type="function pointer">
+  Callback for scalar functions. Set this; leave `xStep` and `xFinal` as `NULL`.
+</ParamField>
+
+<ParamField path="xStep" type="function pointer">
+  Per-row callback for aggregate functions. Set both `xStep` and `xFinal`; leave `xFunc` as `NULL`.
+</ParamField>
+
+<ParamField path="xFinal" type="function pointer">
+  Called once per group to emit the aggregate result. Required when `xStep` is set.
+</ParamField>
+
+<ParamField path="xDestroy" type="function pointer">
+  Destructor for `pApp`. Invoked when the function is deleted (overloaded, or when the connection closes). Also called if registration itself fails.
+</ParamField>
+
+<Note>
+  Exactly one of these two patterns is valid: `(xFunc != NULL, xStep == NULL, xFinal == NULL)` for scalar functions, or `(xFunc == NULL, xStep != NULL, xFinal != NULL)` for aggregates. Any other combination returns `SQLITE_MISUSE`.
+</Note>
+
+## `eTextRep` Encoding and Flag Constants
+
+The fourth argument is a bitmask. Start with one encoding, then OR in any desired flags:
+
+| Constant | Purpose |
+|---|---|
+| `SQLITE_UTF8` | Preferred encoding is UTF-8 |
+| `SQLITE_UTF16LE` | Preferred encoding is UTF-16 little-endian |
+| `SQLITE_UTF16BE` | Preferred encoding is UTF-16 big-endian |
+| `SQLITE_UTF16` | Preferred encoding is UTF-16, native byte order |
+| `SQLITE_DETERMINISTIC` | Same inputs always produce same output (enables query-planner optimizations) |
+| `SQLITE_INNOCUOUS` | Function does not read or alter the database schema or data |
+| `SQLITE_DIRECTONLY` | Function may only be called from top-level SQL, not from triggers or views |
+
+<Tip>
+  Add `SQLITE_DETERMINISTIC` whenever your function is a pure computation (e.g. math, string manipulation). SQLite can then fold constant sub-expressions at compile time and avoid redundant calls.
+</Tip>
+
+## Registering a Window Function: `sqlite3_create_window_function`
+
+```c
+int sqlite3_create_window_function(
+  sqlite3 *db,
+  const char *zFunctionName,
+  int nArg,
+  int eTextRep,
+  void *pApp,
+  void (*xStep)(sqlite3_context*, int, sqlite3_value**),
+  void (*xFinal)(sqlite3_context*),
+  void (*xValue)(sqlite3_context*),
+  void (*xInverse)(sqlite3_context*, int, sqlite3_value**),
+  void (*xDestroy)(void*)
+);
+```
+
+When `xValue` and `xInverse` are both non-`NULL`, the function can be used in `OVER(...)` window expressions in addition to normal aggregate contexts. When both are `NULL`, the result is a plain aggregate (identical to `sqlite3_create_function_v2` with `xStep`/`xFinal`).
+
+- **`xValue`** — Returns the current aggregate value for the window frame without finalizing state.
+- **`xInverse`** — Removes the oldest row from the window frame (the inverse of `xStep`).
+
+## Implementing a Scalar Function
+
+The callback signature for `xFunc`:
+
+```c
+void xFunc(sqlite3_context *ctx, int argc, sqlite3_value **argv);
+```
+
+Inside the callback, read arguments with `sqlite3_value_*` and write the result with `sqlite3_result_*`.
+
+### Accessing Arguments
+
+```c
+int           sqlite3_value_int(sqlite3_value*);
+sqlite3_int64 sqlite3_value_int64(sqlite3_value*);
+double        sqlite3_value_double(sqlite3_value*);
+const unsigned char *sqlite3_value_text(sqlite3_value*);   /* UTF-8 */
+const void          *sqlite3_value_blob(sqlite3_value*);
+int                  sqlite3_value_bytes(sqlite3_value*);
+int                  sqlite3_value_type(sqlite3_value*);   /* SQLITE_INTEGER etc. */
+```
+
+### Returning Results
+
+<CodeGroup>
+```c Numeric results
+void sqlite3_result_int(sqlite3_context*, int);
+void sqlite3_result_int64(sqlite3_context*, sqlite3_int64);
+void sqlite3_result_double(sqlite3_context*, double);
+void sqlite3_result_null(sqlite3_context*);
+```
+
+```c Text / BLOB results
+/* destructor: SQLITE_STATIC or SQLITE_TRANSIENT, or a free() callback */
+void sqlite3_result_text(sqlite3_context*, const char*, int n, void(*destructor)(void*));
+void sqlite3_result_blob(sqlite3_context*, const void*, int n, void(*destructor)(void*));
+void sqlite3_result_zeroblob(sqlite3_context*, int n);  /* n zero bytes */
+```
+
+```c Error results
+void sqlite3_result_error(sqlite3_context*, const char* msg, int len);
+void sqlite3_result_error_toobig(sqlite3_context*);
+void sqlite3_result_error_nomem(sqlite3_context*);
+void sqlite3_result_error_code(sqlite3_context*, int errcode);
+```
+
+```c Pass-through
+void sqlite3_result_value(sqlite3_context*, sqlite3_value*);
+```
+</CodeGroup>
+
+For `sqlite3_result_text()` and `sqlite3_result_blob()`, the third parameter `n` is the byte count (`-1` to use `strlen()` for text). The destructor argument controls memory ownership:
+
+| Destructor | Meaning |
+|---|---|
+| `SQLITE_STATIC` | The buffer is constant and needs no deallocation |
+| `SQLITE_TRANSIENT` | SQLite makes its own copy before returning |
+| Custom function pointer | SQLite calls it to free the buffer when done |
+
+## Utility Functions Inside Callbacks
+
+```c
+void   *sqlite3_user_data(sqlite3_context*);        /* retrieve pApp */
+sqlite3 *sqlite3_context_db_handle(sqlite3_context*); /* get db connection */
+```
+
+## Implementing an Aggregate Function
+
+Aggregate functions pair `xStep` (called once per row) with `xFinal` (called once per group). Persistent per-group state lives in a buffer allocated with `sqlite3_aggregate_context()`:
+
+```c
+void *sqlite3_aggregate_context(sqlite3_context*, int nBytes);
+```
+
+On the first call for a particular group, `nBytes` bytes are zero-initialized and the pointer is returned. Subsequent calls return the same pointer. When finalizing with no rows matched, `xFinal` is called and `sqlite3_aggregate_context(ctx, 0)` returns `NULL` or the existing pointer.
+
+## Complete Example: Scalar `str_reverse` and Aggregate `product`
+
+```c
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "sqlite3.h"
+
+/* ── Scalar function: reverses a UTF-8 string ───────────────────────── */
+static void str_reverse_func(sqlite3_context *ctx, int argc,
+                              sqlite3_value **argv) {
+    if (sqlite3_value_type(argv[0]) == SQLITE_NULL) {
+        sqlite3_result_null(ctx);
+        return;
+    }
+    const unsigned char *input = sqlite3_value_text(argv[0]);
+    int len = sqlite3_value_bytes(argv[0]);
+
+    char *buf = (char *)malloc(len + 1);
+    if (!buf) { sqlite3_result_error_nomem(ctx); return; }
+
+    for (int i = 0; i < len; i++)
+        buf[i] = input[len - 1 - i];
+    buf[len] = '\0';
+
+    /* SQLITE_TRANSIENT: SQLite copies the result; we free buf ourselves */
+    sqlite3_result_text(ctx, buf, len, SQLITE_TRANSIENT);
+    free(buf);
+}
+
+/* ── Aggregate function: product of a numeric column ────────────────── */
+typedef struct { double product; int count; } ProductCtx;
+
+static void product_step(sqlite3_context *ctx, int argc,
+                          sqlite3_value **argv) {
+    ProductCtx *p = (ProductCtx *)sqlite3_aggregate_context(ctx, sizeof(*p));
+    if (!p) return;
+    if (sqlite3_value_type(argv[0]) != SQLITE_NULL) {
+        if (p->count == 0) p->product = 1.0;
+        p->product *= sqlite3_value_double(argv[0]);
+        p->count++;
+    }
+}
+
+static void product_final(sqlite3_context *ctx) {
+    ProductCtx *p = (ProductCtx *)sqlite3_aggregate_context(ctx, 0);
+    if (p && p->count > 0)
+        sqlite3_result_double(ctx, p->product);
+    else
+        sqlite3_result_null(ctx);
+}
+
+/* ── Registration ───────────────────────────────────────────────────── */
+int register_custom_functions(sqlite3 *db) {
+    int rc;
+
+    rc = sqlite3_create_function_v2(
+        db, "str_reverse", 1,
+        SQLITE_UTF8 | SQLITE_DETERMINISTIC | SQLITE_INNOCUOUS,
+        NULL,           /* pApp     */
+        str_reverse_func, NULL, NULL,  /* xFunc, xStep, xFinal */
+        NULL            /* xDestroy */
+    );
+    if (rc != SQLITE_OK) return rc;
+
+    rc = sqlite3_create_function_v2(
+        db, "product", 1,
+        SQLITE_UTF8,
+        NULL,
+        NULL, product_step, product_final,  /* aggregate */
+        NULL
+    );
+    return rc;
+}
+
+/* ── Usage ──────────────────────────────────────────────────────────── */
+int main(void) {
+    sqlite3 *db;
+    sqlite3_open(":memory:", &db);
+    register_custom_functions(db);
+
+    /* Scalar: SELECT str_reverse('hello') → 'olleh' */
+    sqlite3_stmt *stmt;
+    sqlite3_prepare_v2(db, "SELECT str_reverse('hello')", -1, &stmt, NULL);
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        printf("Reversed: %s\n", sqlite3_column_text(stmt, 0));
+    sqlite3_finalize(stmt);
+
+    /* Aggregate: SELECT product(x) FROM ... */
+    sqlite3_exec(db, "CREATE TABLE nums(x REAL)", NULL, NULL, NULL);
+    sqlite3_exec(db, "INSERT INTO nums VALUES (2),(3),(4)", NULL, NULL, NULL);
+    sqlite3_prepare_v2(db, "SELECT product(x) FROM nums", -1, &stmt, NULL);
+    if (sqlite3_step(stmt) == SQLITE_ROW)
+        printf("Product: %g\n", sqlite3_column_double(stmt, 0));  /* 24 */
+    sqlite3_finalize(stmt);
+
+    sqlite3_close(db);
+    return 0;
+}
+```
+
+<Note>
+  Built-in SQLite functions can be overloaded by registering an application-defined function with the same name. SQLite always prefers a registration with a matching text encoding over one with a mismatched encoding, and a fixed-arity registration over a variable-arity (`nArg == -1`) one.
+</Note>

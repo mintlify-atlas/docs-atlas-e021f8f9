@@ -1,0 +1,165 @@
+---
+title: "Compile SQLite from Source on Linux and macOS"
+sidebarTitle: "Build on Unix"
+description: "Step-by-step instructions for building SQLite 3.54.0 from canonical source on Linux and macOS using GCC or Clang and the autosetup configure script."
+---
+
+SQLite's Unix build system uses [autosetup](https://msteveb.github.io/autosetup/) — a lightweight configuration framework that generates a `Makefile` suitable for your platform. The workflow mirrors the classic `./configure && make` pattern used by most open-source C libraries. These instructions have been tested on Ubuntu and macOS and should work on any modern Unix-like platform. You do not need TCL to build the core deliverables (`sqlite3.c` and the `sqlite3` command-line tool), but several additional targets — including the test suite and the TCL extension — do require a TCL 8.6 or later installation.
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="C Compiler" icon="code">
+    GCC or Clang, version supporting C99 or later. Install with your system package manager, e.g. `apt install gcc` or `brew install gcc`.
+  </Card>
+  <Card title="make" icon="hammer">
+    GNU Make or any POSIX-compatible make. Usually pre-installed; otherwise `apt install make`.
+  </Card>
+  <Card title="TCL (optional)" icon="puzzle-piece">
+    Required for the test suite, `tclextension-install`, and `sqlite3_analyzer`. TCL 8.6 or 9.0 both work. Install with `apt install tcl-dev` or build from source.
+  </Card>
+  <Card title="linenoise (optional)" icon="terminal">
+    Provides command-line editing in the interactive shell. Place the source tree at `$HOME/linenoise` or as a sibling of the SQLite source tree and `./configure` will detect it automatically.
+  </Card>
+</CardGroup>
+
+## Build Steps
+
+<Steps>
+  <Step title="Install build tools">
+    On Debian/Ubuntu:
+
+    ```bash
+    apt install gcc make tcl-dev
+    ```
+
+    On macOS with Homebrew, Clang is provided by Xcode Command Line Tools. Install them with:
+
+    ```bash
+    xcode-select --install
+    ```
+  </Step>
+
+  <Step title="Download and unpack the source tree">
+    Download a source tarball from `https://sqlite.org/download.html` or use a Fossil checkout:
+
+    ```bash
+    tar xzf sqlite.tar.gz   # unpacks into a directory called "sqlite"
+    ```
+  </Step>
+
+  <Step title="Create a separate build directory">
+    The SQLite build system supports out-of-tree builds, which keeps generated files separate from the source tree:
+
+    ```bash
+    mkdir bld
+    cd bld
+    ```
+  </Step>
+
+  <Step title="Run the configure script">
+    From inside the `bld/` directory, point to the configure script at the root of the source tree:
+
+    ```bash
+    ../sqlite/configure
+    ```
+
+    Common configure options are shown below. Run `../sqlite/configure --help` to see all available flags.
+
+    | Option | Effect |
+    |--------|--------|
+    | `--enable-all` | Enable all optional features (recommended for release builds) |
+    | `--dev` | Enable extra debugging code; sets `--enable-all` implicitly |
+    | `--with-tclsh=PATH` | Path to `tclsh` if it is not the first one on `$PATH` |
+    | `CFLAGS='-O0 -g'` | Override compiler flags (useful with `--dev`) |
+
+    **Release build** (what the core developers typically use):
+
+    ```bash
+    ../sqlite/configure --enable-all
+    ```
+
+    **Debug build** for working on the SQLite source itself:
+
+    ```bash
+    ../sqlite/configure --dev CFLAGS='-O0 -g'
+    ```
+
+    **Build with a private TCL installation** at `$HOME/local`:
+
+    ```bash
+    ../sqlite/configure --enable-all --with-tclsh=$HOME/local/bin/tclsh9.0
+    ```
+  </Step>
+
+  <Step title="Run make with the desired target">
+    From the `bld/` directory, run `make` followed by the target name.
+
+    **Targets that do not require TCL:**
+
+    ```bash
+    make sqlite3.c          # Generate the amalgamation source file
+    make sqlite3            # Build the sqlite3 command-line tool
+    make sqldiff            # Build the sqldiff utility
+    make sqlite3_rsync      # Build the sqlite3_rsync utility
+    ```
+
+    **Targets that require TCL development libraries:**
+
+    ```bash
+    make tclextension-install   # Build and install the SQLite TCL extension
+    make devtest                # Run the standard development test suite
+    make releasetest            # Run the full release test suite (needs valgrind too)
+    make sqlite3_analyzer       # Build the database analysis tool
+    ```
+
+    <Note>
+      Installing the TCL extension before running tests (`make tclextension-install`) is not strictly required, but the test suite runs more smoothly when it is present. The TCL extension version does not need to match the SQLite version under test — install it once and reuse it across versions.
+    </Note>
+  </Step>
+
+  <Step title="(Optional) Pass additional compile-time options">
+    The `OPTIONS=...` argument on the `make` command line lets you add compile-time preprocessor definitions on top of those selected by `./configure`. For example, to build the CLI with deprecated APIs removed:
+
+    ```bash
+    make OPTIONS=-DSQLITE_OMIT_DEPRECATED sqlite3
+    ```
+
+    Multiple options can be combined:
+
+    ```bash
+    make OPTIONS="-DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE" sqlite3
+    ```
+
+    See the [Compile Options](/building/compile-options) page for descriptions of every available option.
+  </Step>
+</Steps>
+
+## Fallback: Makefile.linux-gcc
+
+If `./configure` does not work in your environment, the source tree includes a generic makefile named **`Makefile.linux-gcc`** in the top-level directory. Copy it to a new name and edit it to match your platform — the comments inside describe exactly which variables need to be changed.
+
+```bash
+cp ../sqlite/Makefile.linux-gcc ./Makefile
+# Edit the Makefile to set TCLDIR, CC, and other variables
+make sqlite3
+```
+
+<Warning>
+`Makefile.linux-gcc` is a last resort. The `./configure` script is actively maintained and handles a much wider range of platform quirks automatically.
+</Warning>
+
+## Key Make Targets Reference
+
+| Target | TCL Required | Description |
+|--------|:---:|-------------|
+| `sqlite3.c` | No | Generate the amalgamation |
+| `sqlite3` | No | Command-line shell binary |
+| `sqldiff` | No | Tool for diffing two SQLite databases |
+| `sqlite3_rsync` | No | Remote sync utility |
+| `tclextension-install` | Yes | Build and install the TCL extension |
+| `devtest` | Yes | Standard developer test run |
+| `releasetest` | Yes | Full release validation (also needs valgrind) |
+| `sqlite3_analyzer` | Yes | Database page analysis tool |
+| `verify-source` | No | Verify source-tree integrity via manifest hashes |
+| `target_source` | No | Populate the `tsrc/` staging directory |

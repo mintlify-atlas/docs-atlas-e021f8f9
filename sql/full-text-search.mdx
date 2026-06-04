@@ -1,0 +1,362 @@
+---
+title: "Full-Text Search with FTS5 in SQLite"
+sidebarTitle: "Full-Text Search"
+description: "Build full-text search into SQLite using FTS5 virtual tables: tokenizers, MATCH queries, bm25/highlight/snippet functions, external content, and fts5vocab."
+---
+
+FTS5 is SQLite's fifth-generation full-text search engine, implemented as a virtual table module in the `ext/fts5/` directory. Unlike `LIKE`-based searching, FTS5 maintains an inverted index over tokenised text, enabling fast ranked searches across large document collections. FTS5 is included in the SQLite amalgamation and enabled by default in most distributions.
+
+## FTS5 vs. LIKE-Based Search
+
+| Aspect | `LIKE '%term%'` | FTS5 `MATCH` |
+|---|---|---|
+| Index used | None (full scan) | Inverted index |
+| Performance | O(n) — scans every row | O(log n + results) |
+| Ranking | Not built-in | `bm25()` built-in |
+| Phrase queries | No | Yes |
+| Prefix queries | No | Yes (`term*`) |
+| Relevance ordering | No | Yes (`ORDER BY rank`) |
+| Stemming/tokenization | No | Pluggable tokenizers |
+
+---
+
+## Creating an FTS5 Virtual Table
+
+```sql
+CREATE VIRTUAL TABLE docs USING fts5(
+  title,
+  body,
+  author UNINDEXED    -- stored but not indexed
+);
+```
+
+The column list works similarly to a regular table, except:
+- All columns are `TEXT` and indexed by default.
+- `UNINDEXED` columns are stored in the FTS5 content table but not included in the full-text index.
+- There is an implicit `rowid` column.
+
+### With Configuration Options
+
+```sql
+CREATE VIRTUAL TABLE articles USING fts5(
+  title,
+  content,
+  tokenize  = 'porter ascii',   -- Porter stemmer over ASCII text
+  content   = 'articles_base',  -- external content table
+  content_rowid = 'id',         -- rowid column in the content table
+  columnsize = 0,               -- don't store per-column token counts
+  detail    = 'none'            -- minimal index detail (smallest index size)
+);
+```
+
+---
+
+## Configuration Options
+
+<Accordion title="tokenize">
+Controls how text is broken into tokens. Built-in tokenizers:
+
+| Tokenizer | Description |
+|---|---|
+| `unicode61` (default) | Unicode 6.1 word-boundary tokeniser, case-folding |
+| `ascii` | ASCII-only, ignores non-ASCII bytes |
+| `porter` | Porter stemmer (wraps another tokenizer) |
+
+```sql
+CREATE VIRTUAL TABLE docs USING fts5(
+  body,
+  tokenize = 'porter unicode61'   -- porter stemmer over unicode61
+);
+
+CREATE VIRTUAL TABLE docs2 USING fts5(
+  body,
+  tokenize = 'ascii'
+);
+```
+</Accordion>
+
+<Accordion title="content= and content_rowid=">
+`content=''` creates a *contentless* FTS5 table — the original text is not stored inside the FTS index, only the inverted index. Useful when the source data lives in another table.
+
+`content='tablename'` creates an *external content* table — the FTS index is kept in sync with an existing table. See [External Content Tables](#external-content-tables) below.
+
+```sql
+-- Contentless (smallest possible index; cannot retrieve original text)
+CREATE VIRTUAL TABLE search_idx USING fts5(
+  title, body,
+  content = ''
+);
+
+-- External content
+CREATE VIRTUAL TABLE search_idx USING fts5(
+  title, body,
+  content     = 'pages',   -- read text from the 'pages' table
+  content_rowid = 'page_id'
+);
+```
+</Accordion>
+
+<Accordion title="columnsize=">
+`columnsize=1` (default): store per-column token counts. Required for `highlight()` and `snippet()`.  
+`columnsize=0`: omit per-column counts; reduces index size but disables column-level auxiliary functions.
+</Accordion>
+
+<Accordion title="detail=">
+Controls how much positional information is stored per token:
+
+| Value | Description |
+|---|---|
+| `full` (default) | Stores column number and token offset — supports all queries |
+| `col` | Stores column number only — no phrase queries within a column |
+| `none` | Stores only which rows match — smallest index; no phrase or column-filter queries |
+</Accordion>
+
+---
+
+## Inserting, Updating, and Deleting
+
+FTS5 virtual tables support standard DML:
+
+```sql
+INSERT INTO docs (title, body) VALUES
+  ('SQLite Overview', 'SQLite is a fast embedded relational database.'),
+  ('FTS5 Guide',      'Full-text search with FTS5 is powerful and easy.');
+
+UPDATE docs SET body = 'Updated content here.' WHERE rowid = 1;
+
+DELETE FROM docs WHERE rowid = 2;
+```
+
+<Warning>
+If you use an external content table (`content=`), changes to the source table do **not** automatically update the FTS index. You must manually keep them in sync via triggers or a periodic rebuild (see below).
+</Warning>
+
+---
+
+## Querying with MATCH
+
+All FTS5 queries use the `MATCH` operator (or its `=` alias in some contexts).
+
+### Basic Term and Phrase Queries
+
+```sql
+-- Single term
+SELECT rowid, title FROM docs WHERE docs MATCH 'database';
+
+-- Exact phrase (terms must be adjacent in this order)
+SELECT * FROM docs WHERE docs MATCH '"embedded relational"';
+
+-- Multi-term (implicit AND)
+SELECT * FROM docs WHERE docs MATCH 'fast database';
+```
+
+### Boolean Operators
+
+FTS5 query syntax supports `AND`, `OR`, and `NOT` (uppercase required):
+
+```sql
+SELECT * FROM docs WHERE docs MATCH 'sqlite AND database';
+SELECT * FROM docs WHERE docs MATCH 'sqlite OR mysql';
+SELECT * FROM docs WHERE docs MATCH 'database NOT mysql';
+```
+
+### Prefix Queries
+
+```sql
+-- Match any token beginning with 'embed'
+SELECT * FROM docs WHERE docs MATCH 'embed*';
+```
+
+### Column Filters
+
+Restrict a term or sub-expression to a specific column:
+
+```sql
+-- 'sqlite' must appear in the title column
+SELECT * FROM docs WHERE docs MATCH 'title:sqlite';
+
+-- Combine column filter with global term
+SELECT * FROM docs WHERE docs MATCH 'title:sqlite body:performance';
+```
+
+### Ranking by Relevance
+
+By default, FTS5 returns rows in rowid order. To rank by relevance, use the built-in `rank` column or `bm25()`:
+
+```sql
+SELECT title, rank
+FROM   docs
+WHERE  docs MATCH 'database'
+ORDER  BY rank;   -- rank is negative BM25; more negative = more relevant
+```
+
+---
+
+## Auxiliary Functions
+
+### bm25()
+
+`bm25()` returns the BM25 relevance score for the current row (lower/more-negative = more relevant).
+
+```sql
+SELECT title, bm25(docs) AS score
+FROM   docs
+WHERE  docs MATCH 'sqlite performance'
+ORDER  BY score;
+```
+
+You can pass per-column weights as additional arguments (one weight per indexed column):
+
+```sql
+-- Weight title matches 10x higher than body matches
+SELECT title, bm25(docs, 10.0, 1.0) AS score
+FROM   docs
+WHERE  docs MATCH 'sqlite'
+ORDER  BY score;
+```
+
+### highlight()
+
+`highlight(table, column_index, open_tag, close_tag)` returns the column's text with matching terms wrapped in the provided tags.
+
+```sql
+SELECT highlight(docs, 1, '<b>', '</b>') AS excerpt
+FROM   docs
+WHERE  docs MATCH 'embedded relational'
+ORDER  BY rank;
+-- Returns body text with matching terms wrapped in <b>...</b>
+```
+
+### snippet()
+
+`snippet(table, column_index, open_tag, close_tag, ellipsis, token_count)` returns a short fragment of the matching column text centred around a match, with matched terms highlighted.
+
+```sql
+SELECT snippet(docs, 1, '<mark>', '</mark>', '…', 20) AS snippet
+FROM   docs
+WHERE  docs MATCH 'sqlite database'
+ORDER  BY rank;
+-- Returns up to 20 tokens around the best match, marked up
+```
+
+---
+
+## External Content Tables
+
+An external content FTS5 table lets you index text that lives in a regular SQLite table, keeping them in sync via triggers.
+
+```sql
+-- Source table
+CREATE TABLE pages (
+  page_id INTEGER PRIMARY KEY,
+  title   TEXT,
+  body    TEXT
+);
+
+-- FTS5 index pointing at pages
+CREATE VIRTUAL TABLE pages_fts USING fts5(
+  title, body,
+  content     = 'pages',
+  content_rowid = 'page_id'
+);
+
+-- Triggers to keep the index in sync
+CREATE TRIGGER pages_ai AFTER INSERT ON pages BEGIN
+  INSERT INTO pages_fts(rowid, title, body)
+  VALUES (new.page_id, new.title, new.body);
+END;
+
+CREATE TRIGGER pages_ad AFTER DELETE ON pages BEGIN
+  INSERT INTO pages_fts(pages_fts, rowid, title, body)
+  VALUES ('delete', old.page_id, old.title, old.body);
+END;
+
+CREATE TRIGGER pages_au AFTER UPDATE ON pages BEGIN
+  INSERT INTO pages_fts(pages_fts, rowid, title, body)
+  VALUES ('delete', old.page_id, old.title, old.body);
+  INSERT INTO pages_fts(rowid, title, body)
+  VALUES (new.page_id, new.title, new.body);
+END;
+```
+
+---
+
+## FTS5 Special Commands via INSERT
+
+FTS5 supports special administrative commands delivered as `INSERT` statements targeting the table-name column:
+
+```sql
+-- Rebuild the entire FTS index from the content table
+INSERT INTO docs(docs) VALUES('rebuild');
+
+-- Optimise the index (merge all segments into one)
+INSERT INTO docs(docs) VALUES('optimize');
+
+-- Delete a specific rowid from a contentless table
+INSERT INTO docs(docs, rowid, title, body)
+VALUES('delete', 42, 'old title', 'old body');
+
+-- Delete all content from a contentless table
+INSERT INTO docs(docs) VALUES('delete-all');
+```
+
+---
+
+## The fts5vocab Virtual Table
+
+`fts5vocab` exposes the FTS5 inverted index as a queryable virtual table. There are three schema types: `row`, `col`, and `instance`.
+
+```sql
+-- row type: one row per term; doc = #docs containing term, cnt = total occurrences
+CREATE VIRTUAL TABLE docs_v USING fts5vocab('docs', 'row');
+
+SELECT term, doc, cnt FROM docs_v
+WHERE term BETWEEN 'dat' AND 'daz'
+ORDER BY cnt DESC;
+```
+
+```sql
+-- col type: one row per (term, column) pair
+CREATE VIRTUAL TABLE docs_vc USING fts5vocab('docs', 'col');
+
+SELECT term, col, doc, cnt FROM docs_vc WHERE term = 'sqlite';
+```
+
+```sql
+-- instance type: one row per token occurrence
+CREATE VIRTUAL TABLE docs_vi USING fts5vocab('docs', 'instance');
+
+SELECT term, doc, col, offset FROM docs_vi WHERE term = 'sqlite';
+```
+
+<Tip>
+`fts5vocab` is useful for building autocomplete lists, finding common terms, analysing document frequency distributions, and debugging tokenizer behaviour.
+</Tip>
+
+---
+
+## Complete Example
+
+```sql
+-- Create the FTS5 table
+CREATE VIRTUAL TABLE articles USING fts5(
+  title,
+  body,
+  tokenize = 'porter unicode61'
+);
+
+-- Populate
+INSERT INTO articles VALUES
+  ('Introduction to SQLite', 'SQLite is a lightweight, embedded SQL database engine.'),
+  ('SQLite Performance Tips', 'Use indexes, WAL mode, and batched transactions for speed.'),
+  ('Full-Text Search Guide', 'FTS5 provides ranked full-text search with BM25 scoring.');
+
+-- Ranked full-text query with highlighted snippets
+SELECT
+  title,
+  snippet(articles, 1, '<b>', '</b>', '…', 15) AS preview,
+  bm25(articles) AS score
+FROM articles
+WHERE articles MATCH 'sqlite AND (database OR search)'
+ORDER BY score;
+```

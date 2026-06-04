@@ -1,0 +1,191 @@
+---
+title: "SQLite Extensions: Loadable and Built-In Modules"
+sidebarTitle: "Overview"
+description: "A complete guide to SQLite extensions: loading shared libraries at runtime, auto-registering built-in modules, and the ext/misc one-file utility extensions."
+---
+
+SQLite's extension system lets you add custom SQL functions, virtual tables, and collations without modifying the SQLite core. Extensions range from small single-file utilities bundled in `ext/misc` to heavyweight built-in modules like FTS5, R-Tree, and the Session extension. Understanding how extensions are discovered, loaded, and registered is the first step toward using or building them.
+
+## What is an Extension?
+
+An SQLite extension is a compiled shared library (or a statically linked module) that registers one or more of the following with a database connection:
+
+- **Custom scalar or aggregate SQL functions** — e.g., `sha3()`, `rot13()`, `decimal_add()`
+- **Virtual tables** — tables whose data is computed rather than stored, e.g., FTS5 search tables, R-Tree spatial indexes, or CSV readers
+- **Custom collations** — alternative sort orders for text columns
+- **VFS (Virtual File System) layers** — replacements or wrappers around the OS I/O layer
+
+Every extension exposes an entry-point function with the signature:
+
+```c
+int sqlite3_X_init(
+  sqlite3 *db,
+  char **pzErrMsg,
+  const sqlite3_api_routines *pApi
+);
+```
+
+where `X` is derived from the library filename. If the library is named `myext.so`, SQLite looks for `sqlite3_myext_init`.
+
+## Loading Extensions at Runtime
+
+### C API: sqlite3_load_extension()
+
+Extension loading must first be enabled on the connection. The recommended approach uses `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION`, which enables only the C API without also enabling the SQL `load_extension()` function (reducing SQL-injection risk):
+
+```c
+/* Enable C-API extension loading only (recommended) */
+sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, NULL);
+
+/* Load the extension */
+char *zErrMsg = NULL;
+int rc = sqlite3_load_extension(db, "path/to/myext", NULL, &zErrMsg);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Extension load error: %s\n", zErrMsg);
+    sqlite3_free(zErrMsg);
+}
+```
+
+The third argument is the entry-point name. Pass `NULL` and SQLite will derive the name from the filename automatically (trying `sqlite3_extension_init` and then `sqlite3_X_init` where `X` is derived from the base filename).
+
+<Warning>
+  Avoid `sqlite3_enable_load_extension(db, 1)` in production — it also enables
+  the SQL `load_extension()` function, which could be exploited via SQL
+  injection. Use `SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION` instead to keep the
+  SQL function disabled.
+</Warning>
+
+### CLI: .load Command
+
+In the `sqlite3` command-line shell, load an extension with:
+
+```bash
+.load ./path/to/myext
+```
+
+You can optionally specify the entry-point name as a second argument:
+
+```bash
+.load ./myext sqlite3_myext_init
+```
+
+The shell enables extension loading automatically when you use `.load`.
+
+### SQL Function: load_extension()
+
+When fully enabled (via `sqlite3_enable_load_extension`), you can also load from SQL:
+
+```sql
+SELECT load_extension('./path/to/myext');
+SELECT load_extension('./path/to/myext', 'sqlite3_myext_init');
+```
+
+<Note>
+  The SQL `load_extension()` function is disabled by default. It must be
+  explicitly enabled via `sqlite3_enable_load_extension(db, 1)`.
+</Note>
+
+## Auto-Registering Extensions: sqlite3_auto_extension()
+
+`sqlite3_auto_extension()` registers an entry-point function that is called automatically for every new database connection opened in the process. This is ideal for statically linked extensions that should always be available:
+
+```c
+/* Register once at process startup */
+sqlite3_auto_extension((void(*)(void))my_extension_init);
+
+/* Every subsequent sqlite3_open() call will auto-load the extension */
+sqlite3 *db;
+sqlite3_open(":memory:", &db);
+/* my_extension_init() has already been called on db */
+```
+
+To unregister a specific auto-extension:
+
+```c
+sqlite3_cancel_auto_extension((void(*)(void))my_extension_init);
+```
+
+To clear all registered auto-extensions at once:
+
+```c
+sqlite3_reset_auto_extension();
+```
+
+## Compile-Time Flag: SQLITE_OMIT_LOAD_EXTENSION
+
+The entire runtime extension-loading mechanism can be compiled out by defining `SQLITE_OMIT_LOAD_EXTENSION` at build time. When this flag is set, `sqlite3_load_extension()` and `sqlite3_enable_load_extension()` are not available, and the SQL `load_extension()` function is not registered. Built-in extensions compiled into the amalgamation are unaffected.
+
+```bash
+gcc -DSQLITE_OMIT_LOAD_EXTENSION -o myapp myapp.c sqlite3.c
+```
+
+## Built-in vs. Optional Extensions
+
+SQLite ships with several extensions that can be compiled into the amalgamation or enabled at build time:
+
+<Accordion title="Always compiled in (amalgamation defaults)">
+  - **JSON functions** (`json1.c`) — `json()`, `json_each()`, `json_object()`, and related functions for JSON processing
+  - **generate_series** — the `generate_series(start, stop, step)` table-valued function
+  - **FTS3/FTS4** — the older full-text search module (superseded by FTS5)
+</Accordion>
+
+<Accordion title="Optional: enabled by compile-time flags">
+  - **FTS5** — enabled with `-DSQLITE_ENABLE_FTS5`; see the [FTS5 page](/extensions/fts5)
+  - **R-Tree** — enabled with `-DSQLITE_ENABLE_RTREE`; see the [R-Tree page](/extensions/rtree)
+  - **Session Extension** — enabled with `-DSQLITE_ENABLE_SESSION -DSQLITE_ENABLE_PREUPDATE_HOOK`; see the [Session page](/extensions/session)
+  - **Geopoly** — enabled with `-DSQLITE_ENABLE_GEOPOLY` alongside R-Tree
+</Accordion>
+
+## The ext/misc Directory
+
+The `ext/misc` directory in the SQLite source tree contains a collection of smaller, single-file loadable extensions. Each is self-contained and easy to compile into a shared library or link directly into an application.
+
+<Accordion title="Notable ext/misc extensions">
+  | File | Description |
+  |---|---|
+  | `csv.c` | Virtual table for reading CSV files directly with SQL |
+  | `json1.c` | JSON functions (already in the amalgamation) |
+  | `series.c` | `generate_series()` virtual table (template for new virtual tables) |
+  | `shathree.c` | `sha3()` and `sha3_query()` SQL functions |
+  | `rot13.c` | `rot13()` substitution function (good starter template for custom functions) |
+  | `unionvtab.c` | `unionvtab` and `swarmvtab` — spread one logical table across multiple database files |
+  | `zipfile.c` | Virtual table for reading and writing ZIP archives |
+  | `decimal.c` | Arbitrary-precision decimal arithmetic functions |
+  | `completion.c` | Tab-completion support for the CLI |
+  | `carray.c` | Bind a C array as a table-valued function |
+</Accordion>
+
+To compile `csv.c` as a loadable shared library on Linux:
+
+```bash
+gcc -shared -fPIC -o csv.so csv.c
+```
+
+Then load it at runtime:
+
+```bash
+sqlite3 mydb.db
+.load ./csv
+SELECT * FROM csv_read('data.csv', 1);
+```
+
+## Extension Pages
+
+<CardGroup cols={2}>
+  <Card title="FTS5" icon="magnifying-glass" href="/extensions/fts5">
+    Full-text search with phrase queries, BM25 ranking, highlight/snippet
+    functions, and external content tables.
+  </Card>
+  <Card title="R-Tree" icon="map" href="/extensions/rtree">
+    Spatial indexing for bounding-box and proximity queries using the R-Tree
+    algorithm.
+  </Card>
+  <Card title="Session" icon="code-compare" href="/extensions/session">
+    Record INSERT/UPDATE/DELETE changes as binary changesets and replay or invert
+    them on another database.
+  </Card>
+  <Card title="WASM" icon="browser" href="/extensions/wasm">
+    SQLite compiled to WebAssembly for use in browsers and Node.js, with OPFS
+    persistent storage support.
+  </Card>
+</CardGroup>

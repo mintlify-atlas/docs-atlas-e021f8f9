@@ -1,0 +1,139 @@
+---
+title: "Using the SQLite Amalgamation in Your Project"
+sidebarTitle: "Amalgamation"
+description: "Learn how to integrate the SQLite amalgamation — sqlite3.c and sqlite3.h — into any project for the simplest and fastest possible build."
+---
+
+The SQLite amalgamation bundles the entire SQLite library into two files: **`sqlite3.c`** and **`sqlite3.h`**. Rather than compiling dozens of individual C source modules, you drop these two files directly into your project and compile them alongside your own code. This is the officially recommended way to ship SQLite as part of an application. Because all of SQLite's source is visible to the compiler in a single translation unit, it can perform cross-procedure analysis and optimization that would not be possible when linking a pre-built static or shared library. According to the SQLite documentation, this yields roughly a **5% speed improvement** over compiling individual source files separately.
+
+## What the Amalgamation Contains
+
+The amalgamation is generated from all of the individual C source files and automatically-generated files in the SQLite source tree. The script `tool/mksqlite3c.tcl` collects every file from the `tsrc/` staging directory and concatenates them in the correct order, resolving internal `#include` references along the way. The result is a single `sqlite3.c` that is more than **200,000 lines long**, paired with the `sqlite3.h` public header derived from `src/sqlite.h.in`.
+
+<Note>
+The amalgamation is the **only** distribution file most applications ever need. You do not need the rest of the SQLite source tree to use it.
+</Note>
+
+## Obtaining the Amalgamation
+
+You have two ways to get the amalgamation files:
+
+<Tabs>
+  <Tab title="Download (recommended)">
+    Download the prebuilt amalgamation directly from the SQLite download page. The archive contains `sqlite3.c`, `sqlite3.h`, and the optional shell source `shell.c`.
+
+    ```
+    https://sqlite.org/download.html
+    ```
+
+    Look for the file named **`sqlite-amalgamation-XXXXXXXX.zip`**. This is the fastest path for application developers — no build tools required.
+  </Tab>
+  <Tab title="Build from Source">
+    If you have checked out the canonical SQLite source tree (via Fossil or a tarball), you can generate the amalgamation yourself:
+
+    ```bash
+    mkdir bld && cd bld
+    ../sqlite/configure
+    make sqlite3.c
+    ```
+
+    After the build completes, `sqlite3.c` and `sqlite3.h` appear in the build directory.
+  </Tab>
+</Tabs>
+
+## Integrating the Amalgamation
+
+<Steps>
+  <Step title="Copy the files into your project">
+    Place `sqlite3.c` and `sqlite3.h` into a directory inside your source tree, for example `third_party/sqlite/`:
+
+    ```
+    your-project/
+    ├── src/
+    │   └── main.c
+    └── third_party/
+        └── sqlite/
+            ├── sqlite3.c
+            └── sqlite3.h
+    ```
+  </Step>
+
+  <Step title="Compile sqlite3.c alongside your own sources">
+    Add `sqlite3.c` to your normal compilation step. There is no special configure step — it compiles like any other C file.
+
+    <CodeGroup>
+      ```bash GCC / Clang
+      gcc -O2 -o myapp src/main.c third_party/sqlite/sqlite3.c -lpthread -ldl
+      ```
+
+      ```bash Clang (macOS)
+      clang -O2 -o myapp src/main.c third_party/sqlite/sqlite3.c
+      ```
+
+      ```bat MSVC (Developer Command Prompt)
+      cl /O2 /Fe:myapp.exe src\main.c third_party\sqlite\sqlite3.c
+      ```
+    </CodeGroup>
+
+    <Tip>
+      On Linux you must link against `-lpthread` and `-ldl` unless you compile with `SQLITE_THREADSAFE=0` and `SQLITE_OMIT_LOAD_EXTENSION`.
+    </Tip>
+  </Step>
+
+  <Step title="Include the header in your C/C++ code">
+    In any source file that calls SQLite APIs, add:
+
+    ```c
+    #include "sqlite3.h"
+    ```
+
+    Because `sqlite3.c` and `sqlite3.h` live in the same directory, no extra include path flags are required as long as you compile from that directory or add `-I third_party/sqlite` to your compiler flags.
+  </Step>
+
+  <Step title="(Optional) Pass compile-time options">
+    You can customize SQLite behaviour by defining preprocessor macros when you compile `sqlite3.c`. For example, to enable the FTS5 full-text search engine:
+
+    ```bash
+    gcc -O2 -DSQLITE_ENABLE_FTS5 -o myapp src/main.c third_party/sqlite/sqlite3.c -lpthread -ldl
+    ```
+
+    See the [Compile Options](/building/compile-options) page for the full list of available options.
+  </Step>
+</Steps>
+
+## The Split Amalgamation (sqlite3-all.c)
+
+Some symbolic debuggers — most notably older versions of MSVC — cannot handle source files longer than 64,000 lines. Because `sqlite3.c` exceeds 200,000 lines, this can cause build or debugging failures under those tools.
+
+To work around this, a separate Tcl script, `tool/split-sqlite3c.tcl`, can split the amalgamation into a small coordinator file named **`sqlite3-all.c`** that `#include`s roughly seven numbered fragments: `sqlite3-1.c`, `sqlite3-2.c`, …, `sqlite3-7.c`. No individual fragment exceeds 32,000 lines, so every file stays within the debugger's limit.
+
+<Note>
+Even though the amalgamation is split across multiple files, all fragments are compiled as a single translation unit. The compiler still sees all of SQLite at once and can perform the same cross-procedure optimizations.
+</Note>
+
+To produce the split amalgamation, run the following from your build directory after generating `sqlite3.c`:
+
+```bash
+tclsh ../sqlite/tool/split-sqlite3c.tcl
+```
+
+Then compile `sqlite3-all.c` instead of `sqlite3.c`:
+
+```bat
+cl /O2 /Fe:myapp.exe src\main.c sqlite3-all.c
+```
+
+## When NOT to Use the Amalgamation
+
+<Warning>
+If you are **modifying SQLite itself**, do not edit `sqlite3.c` directly. The amalgamation is a generated artefact. Any hand edits will be overwritten the next time `make sqlite3.c` is run. Work in the individual source files under `src/` instead, then regenerate the amalgamation when you are ready to test the combined output.
+</Warning>
+
+The amalgamation is ideal for:
+- Shipping SQLite as part of an application
+- Embedding SQLite into a library
+- CI pipelines that need a hermetic, dependency-free build
+
+It is **not** appropriate for:
+- Active SQLite core development (use the individual source files)
+- Situations where a system-provided shared library is required for security patching

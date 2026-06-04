@@ -1,0 +1,300 @@
+---
+title: "SQLite Data Types and Type Affinity Rules"
+sidebarTitle: "Data Types"
+description: "Deep dive into SQLite's five storage classes, type affinity system, coercion rules, and all built-in scalar, date/time, and aggregate functions."
+---
+
+SQLite uses a dynamic type system called *type affinity*. Unlike most SQL databases, a column's declared type is a hint that influences — but does not rigidly enforce — how values are stored. Understanding this system is essential for writing correct queries and schemas.
+
+## Storage Classes
+
+Every value stored in SQLite belongs to exactly one of five **storage classes**:
+
+| Storage Class | Description |
+|---|---|
+| `NULL` | The absence of a value |
+| `INTEGER` | Signed integer, stored in 1, 2, 3, 4, 6, or 8 bytes |
+| `REAL` | 8-byte IEEE 754 floating-point number |
+| `TEXT` | UTF-8, UTF-16BE, or UTF-16LE string |
+| `BLOB` | Raw bytes, stored exactly as provided |
+
+<Note>
+"Data type" and "storage class" are nearly synonymous in SQLite. The subtle difference: `INTEGER` is a storage class that encompasses several integer widths; the database picks the most compact representation automatically.
+</Note>
+
+---
+
+## Type Affinity
+
+Each column has a **type affinity** — a preferred storage class for values inserted into it. There are five affinities:
+
+| Affinity | Behaviour |
+|---|---|
+| `TEXT` | Stores using `NULL`, `TEXT`, or `BLOB` |
+| `NUMERIC` | Prefers integer/real; converts text if lossless |
+| `INTEGER` | Like `NUMERIC`; promotes reals with no fractional part to integer |
+| `REAL` | Stores integers as floating-point |
+| `BLOB` (NONE) | No coercion; stores exactly as provided |
+
+### Determining Affinity from Column Type Declaration
+
+SQLite applies these rules in order to the declared type string:
+
+1. If the type contains **`INT`** → `INTEGER` affinity (e.g. `BIGINT`, `INT2`)
+2. If the type contains **`CHAR`, `CLOB`, or `TEXT`** → `TEXT` affinity (e.g. `VARCHAR(255)`, `NCHAR`)
+3. If the type contains **`BLOB`** or is empty → `BLOB`/`NONE` affinity
+4. If the type contains **`REAL`, `FLOA`, or `DOUB`** → `REAL` affinity
+5. Otherwise → `NUMERIC` affinity (e.g. `DECIMAL`, `DATE`, `BOOLEAN`)
+
+```sql
+CREATE TABLE demo (
+  a INTEGER,      -- INTEGER affinity
+  b VARCHAR(100), -- TEXT affinity (contains CHAR)
+  c BLOB,         -- BLOB affinity
+  d FLOAT,        -- REAL affinity (contains FLOA)
+  e NUMERIC,      -- NUMERIC affinity
+  f,              -- BLOB affinity (no type declared)
+  g BOOLEAN       -- NUMERIC affinity (rule 5)
+);
+```
+
+### Type Coercion Rules
+
+When a value is inserted into a column, SQLite applies affinity coercion:
+
+<Accordion title="TEXT affinity coercion">
+Values of type `INTEGER` and `REAL` are converted to `TEXT` before storage.  
+```sql
+CREATE TABLE t (v TEXT);
+INSERT INTO t VALUES (42);      -- stored as '42'
+INSERT INTO t VALUES (3.14);    -- stored as '3.14'
+```
+</Accordion>
+
+<Accordion title="NUMERIC affinity coercion">
+Text strings that look like integers or reals are converted. Lossless round-tripping is required.
+```sql
+CREATE TABLE t (v NUMERIC);
+INSERT INTO t VALUES ('100');   -- stored as INTEGER 100
+INSERT INTO t VALUES ('3.14');  -- stored as REAL 3.14
+INSERT INTO t VALUES ('abc');   -- stored as TEXT 'abc' (no conversion)
+```
+</Accordion>
+
+<Accordion title="INTEGER affinity coercion">
+Same as `NUMERIC`, but additionally promotes `REAL` values with no fractional part to `INTEGER`.
+```sql
+CREATE TABLE t (v INTEGER);
+INSERT INTO t VALUES (3.0);     -- stored as INTEGER 3
+INSERT INTO t VALUES (3.5);     -- stored as REAL 3.5
+```
+</Accordion>
+
+<Accordion title="REAL affinity coercion">
+Integers are promoted to REAL.
+```sql
+CREATE TABLE t (v REAL);
+INSERT INTO t VALUES (5);       -- stored as REAL 5.0
+```
+</Accordion>
+
+---
+
+## Comparison Rules
+
+SQLite uses the following ordering when comparing values of different storage classes:
+
+```
+NULL < INTEGER/REAL < TEXT < BLOB
+```
+
+Two values of the same storage class are compared using their natural ordering. An integer and a real are compared numerically (promoting the integer to real). Text values are compared using the column's collation (default: `BINARY`).
+
+```sql
+SELECT 1 < 'a';   -- 1  (integer sorts before text)
+SELECT 'b' > 1;   -- 1
+SELECT NULL < 0;  -- NULL (any comparison with NULL yields NULL)
+```
+
+---
+
+## BOOLEAN Values
+
+SQLite has no dedicated `BOOLEAN` storage class. Boolean values are stored as `INTEGER`:
+
+- `0` for false
+- `1` for true
+
+The literals `TRUE` and `FALSE` are recognised as aliases for `1` and `0`.
+
+```sql
+CREATE TABLE flags (is_active BOOLEAN DEFAULT TRUE);
+INSERT INTO flags VALUES (FALSE);
+SELECT is_active, typeof(is_active) FROM flags; -- 0, integer
+```
+
+---
+
+## Date and Time Storage
+
+SQLite has no native date/time storage class. Dates and times are conventionally stored in one of three formats:
+
+| Format | Storage Class | Example |
+|---|---|---|
+| ISO 8601 text | `TEXT` | `'2024-06-15 09:30:00'` |
+| Unix timestamp | `INTEGER` | `1718444200` |
+| Julian day number | `REAL` | `2460477.895834` |
+
+All built-in date/time functions accept any of these formats as input.
+
+---
+
+## Date and Time Functions
+
+These functions are implemented in `date.c` and are always available.
+
+<CodeGroup>
+```sql date()
+-- Returns date string YYYY-MM-DD
+SELECT date('now');                         -- '2024-06-15'
+SELECT date('now', '+7 days');              -- 7 days from today
+SELECT date('2024-01-01', 'start of month', '+1 month', '-1 day');
+```
+
+```sql time()
+-- Returns HH:MM:SS
+SELECT time('now');                         -- '14:22:05'
+SELECT time('now', 'localtime');            -- in local timezone
+```
+
+```sql datetime()
+-- Returns YYYY-MM-DD HH:MM:SS
+SELECT datetime('now');
+SELECT datetime(1718444200, 'unixepoch');   -- from unix timestamp
+SELECT datetime(2460477.895834);            -- from Julian day
+```
+
+```sql julianday()
+-- Returns Julian day as REAL
+SELECT julianday('now');                    -- e.g. 2460477.895834
+SELECT julianday('2024-06-15');
+```
+
+```sql unixepoch()
+-- Returns Unix timestamp as INTEGER (SQLite 3.38.0+)
+SELECT unixepoch('now');                    -- e.g. 1718444200
+SELECT unixepoch('2024-06-15', 'start of day');
+```
+
+```sql strftime()
+-- Custom format string
+SELECT strftime('%Y-%m-%d %H:%M', 'now');
+SELECT strftime('%s', 'now');               -- Unix timestamp as text
+SELECT strftime('%j', 'now');               -- Day of year
+```
+</CodeGroup>
+
+### Supported Modifiers
+
+Date/time functions accept a comma-separated list of modifier strings after the time value:
+
+```sql
+SELECT date('now', 'start of year', '+3 months', '-1 day');
+SELECT datetime('now', '+2 hours', 'localtime');
+SELECT date('now', 'weekday 1');  -- next Monday
+```
+
+---
+
+## Built-in Scalar Functions
+
+These functions are implemented in `func.c` and cover the most common operations.
+
+### Numeric Functions
+
+```sql
+SELECT abs(-42);            -- 42
+SELECT abs(NULL);           -- NULL
+SELECT round(3.14159, 2);   -- 3.14
+SELECT random();            -- random 64-bit signed integer
+SELECT randomblob(16);      -- 16 random bytes as BLOB
+```
+
+### String Functions
+
+```sql
+SELECT length('hello');           -- 5  (characters for TEXT, bytes for BLOB)
+SELECT upper('hello');            -- 'HELLO'
+SELECT lower('WORLD');            -- 'world'
+SELECT substr('hello', 2, 3);     -- 'ell'  (1-based indexing)
+SELECT trim('  hi  ');            -- 'hi'
+SELECT ltrim('  hi  ');           -- 'hi  '
+SELECT rtrim('  hi  ');           -- '  hi'
+SELECT trim('xxhelloxx', 'x');    -- 'hello' (removes chars in set)
+SELECT replace('foo bar', 'bar', 'baz'); -- 'foo baz'
+SELECT instr('hello world', 'world');    -- 7
+SELECT hex(X'DEADBEEF');          -- 'DEADBEEF'
+SELECT unhex('DEADBEEF');         -- blob X'DEADBEEF'
+SELECT unicode('A');              -- 65
+SELECT char(65, 66, 67);          -- 'ABC'
+```
+
+### Formatting
+
+```sql
+-- printf() / format() produce formatted text (equivalent functions)
+SELECT printf('%05d', 42);          -- '00042'
+SELECT format('%.2f', 3.14159);     -- '3.14'
+SELECT printf('%s has %d items', 'Cart', 3); -- 'Cart has 3 items'
+```
+
+### Type Inspection and NULL Handling
+
+```sql
+SELECT typeof(42);          -- 'integer'
+SELECT typeof(3.14);        -- 'real'
+SELECT typeof('hi');        -- 'text'
+SELECT typeof(X'ff');       -- 'blob'
+SELECT typeof(NULL);        -- 'null'
+
+SELECT coalesce(NULL, NULL, 'first non-null'); -- 'first non-null'
+SELECT ifnull(NULL, 'default');               -- 'default'
+SELECT nullif(5, 5);                          -- NULL
+SELECT nullif(5, 6);                          -- 5
+
+SELECT iif(score > 90, 'A', 'B') FROM users; -- conditional
+```
+
+### BLOB Functions
+
+```sql
+SELECT zeroblob(8);          -- 8-byte zero-filled BLOB
+SELECT length(zeroblob(8));  -- 8
+```
+
+---
+
+## Aggregate Functions
+
+Aggregate functions operate over groups of rows (typically used with `GROUP BY`).
+
+```sql
+SELECT COUNT(*) FROM users;              -- count all rows
+SELECT COUNT(email) FROM users;          -- count non-NULL email values
+SELECT SUM(score) FROM users;            -- sum (NULL values ignored)
+SELECT AVG(score) FROM users;            -- average
+SELECT MIN(score), MAX(score) FROM users;
+
+-- Concatenate strings within a group
+SELECT group_concat(name, ', ')
+FROM   users
+WHERE  active = 1;
+
+-- group_concat with ORDER BY (SQLite 3.44.0+)
+SELECT group_concat(name ORDER BY name ASC)
+FROM users;
+```
+
+<Tip>
+`COUNT(*)` counts rows including those with NULL values. `COUNT(column)` skips NULLs. Use `COUNT(*)` when you want the total number of rows in a group.
+</Tip>

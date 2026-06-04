@@ -1,0 +1,203 @@
+---
+title: "Compile SQLite from Source on Windows with MSVC"
+sidebarTitle: "Build on Windows"
+description: "Step-by-step guide to building SQLite 3.54.0 on Windows 11 using the MSVC toolchain, nmake, and the Makefile.msc build file."
+---
+
+SQLite can be built on Windows entirely with Microsoft Visual C++ (MSVC). The source tree ships a `Makefile.msc` that drives `nmake`, MSVC's build tool, and a convenience `make.bat` wrapper that lets you type the same `make` commands you would use on Unix. Visual Studio 2015 or later is required; earlier versions are not supported for building from canonical source. TCL is not required to build the core deliverables (`sqlite3.exe` and `sqlite3.c`), but it is needed to run the test suite, build the TCL extension, and compile tools like `sqlite3_analyzer.exe`.
+
+<Note>
+All commands in this guide must be run from an **x64 Native Tools Command Prompt for VS 20XX** (or the x86 / ARM64 variant for a different target architecture). These steps will not work in a standard Command Prompt or in PowerShell.
+</Note>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Microsoft Visual Studio" icon="microsoft">
+    The free **Community Edition** is sufficient. During installation, choose **Desktop development with C++**. SQLite only requires the `cl` compiler and the `nmake` build tool.
+  </Card>
+  <Card title="TCL (optional)" icon="puzzle-piece">
+    Required for tests, the TCL extension, and `sqlite3_analyzer`. Install to `C:\Tcl` for 64-bit builds and `C:\tcl32` for 32-bit builds, as described in the steps below.
+  </Card>
+</CardGroup>
+
+## Build Steps
+
+<Steps>
+  <Step title="Install Visual Studio">
+    Download Visual Studio from [visualstudio.microsoft.com](https://visualstudio.microsoft.com). During setup select **Desktop development with C++**. A standard installation provides everything SQLite needs.
+
+    After installation, locate **"x64 Native Tools Command Prompt for VS 20XX"** under **Start → All Apps → Visual Studio 20XX** and pin it to your taskbar — you will open it every time you build SQLite.
+
+    <Tip>
+      Use the **x86** variant for 32-bit builds, or **ARM64** for Windows on ARM. The build process is otherwise identical.
+    </Tip>
+  </Step>
+
+  <Step title="(Optional) Install TCL development libraries">
+    If you plan to run tests or build the TCL extension, install TCL 9.0 (or 8.6) before proceeding. The following commands install TCL into `C:\Tcl`:
+
+    ```bat
+    REM Download tcl9.0.0.tar.gz and unpack it, then CD into the win\ subfolder:
+    cd tcl9.0.0\win
+
+    nmake /f makefile.vc INSTALLDIR=C:\Tcl release
+    nmake /f makefile.vc INSTALLDIR=C:\Tcl install
+    ```
+
+    <Warning>
+      The two `nmake` commands must be run **separately** in the order shown. The `INSTALLDIR=...` argument is required on both lines.
+    </Warning>
+
+    Optionally, copy `tclsh90.exe` to `tclsh.exe` and add `C:\Tcl\bin` to your `%PATH%` via **Settings → Search "path" → Edit environment variables for your account**. Close and reopen any command prompts after changing `%PATH%`.
+
+    For 32-bit builds, repeat this process with `INSTALLDIR=C:\tcl32` from an **x86 Native Tools Command Prompt**.
+
+    As of SQLite 3.54.0, TCL is **not** required for the most common targets (`sqlite3.c`, `sqlite3.exe`). Skip this step if that is all you need.
+  </Step>
+
+  <Step title="Download and unpack the SQLite source tree">
+    Download a source tarball or ZIP from `https://sqlite.org/download.html` and unpack it. Open your **x64 Native Tools Command Prompt** and `cd` into the top-level directory of the source tree:
+
+    ```bat
+    cd C:\path\to\sqlite
+    ```
+  </Step>
+
+  <Step title="Build using make.bat or nmake directly">
+    The source tree includes a `make.bat` file that maps Unix-style `make` commands to `nmake /f Makefile.msc`. You can use either form interchangeably:
+
+    **Targets that do not require TCL:**
+
+    <CodeGroup>
+      ```bat make.bat
+      make sqlite3.exe
+      make sqlite3.c
+      make sqldiff.exe
+      make sqlite3_rsync.exe
+      ```
+
+      ```bat nmake directly
+      nmake /f Makefile.msc sqlite3.exe
+      nmake /f Makefile.msc sqlite3.c
+      nmake /f Makefile.msc sqldiff.exe
+      nmake /f Makefile.msc sqlite3_rsync.exe
+      ```
+    </CodeGroup>
+
+    **Targets that require TCL:**
+
+    ```bat
+    make tclextension-install
+    make devtest
+    make releasetest
+    make sqlite3_analyzer.exe
+    ```
+
+    <Note>
+      Installing the TCL extension before running tests is not mandatory but makes the test suite run more smoothly. The extension version does not need to match the SQLite version under test.
+    </Note>
+  </Step>
+
+  <Step title="(Optional) Set TCLDIR if TCL is not in C:\Tcl">
+    If you installed TCL to a directory other than `C:\Tcl`, tell nmake where to find it:
+
+    ```bat
+    set TCLDIR=C:\MyTcl
+    make sqlite3_analyzer.exe
+    ```
+
+    Or pass it directly on the command line:
+
+    ```bat
+    nmake /f Makefile.msc TCLDIR=C:\MyTcl sqlite3_analyzer.exe
+    ```
+  </Step>
+
+  <Step title="(Optional) Pass compile-time options with OPTIONS=">
+    Append `OPTIONS=...` to any `make` or `nmake` invocation to inject additional preprocessor definitions:
+
+    ```bat
+    make OPTIONS=-DSQLITE_OMIT_DEPRECATED sqlite3.exe
+    ```
+
+    Multiple options can be combined in a quoted string:
+
+    ```bat
+    nmake /f Makefile.msc OPTIONS="-DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_RTREE" sqlite3.exe
+    ```
+
+    See the [Compile Options](/building/compile-options) page for the full set of available flags.
+  </Step>
+
+  <Step title="(Optional) Debug build">
+    To build the CLI with `.treetrace` and `.wheretrace` debugging commands enabled, add `DEBUG=3` and a `clean` target before the build target:
+
+    ```bat
+    nmake /f Makefile.msc DEBUG=3 clean sqlite3.exe
+    ```
+  </Step>
+</Steps>
+
+## 32-bit Builds
+
+A 32-bit build follows the same steps with two differences:
+
+1. Open the **x86 Native Tools Command Prompt** (not x64).
+2. Install TCL to `C:\tcl32` (not `C:\Tcl`) and ensure `C:\tcl32\bin` precedes `C:\Tcl\bin` on your path:
+
+```bat
+set PATH=C:\tcl32\bin;%PATH%
+```
+
+## Building a DLL
+
+The command used by the SQLite developers to produce the official distributable DLL is:
+
+```bat
+nmake /f Makefile.msc sqlite3.dll USE_NATIVE_LIBPATHS=1 "OPTS=-DSQLITE_ENABLE_FTS3=1 -DSQLITE_ENABLE_FTS4=1 -DSQLITE_ENABLE_FTS5=1 -DSQLITE_ENABLE_RTREE=1 -DSQLITE_ENABLE_JSON1=1 -DSQLITE_ENABLE_GEOPOLY=1 -DSQLITE_ENABLE_SESSION=1 -DSQLITE_ENABLE_PREUPDATE_HOOK=1 -DSQLITE_ENABLE_SERIALIZE=1 -DSQLITE_ENABLE_MATH_FUNCTIONS=1"
+```
+
+This generates both `sqlite3.dll` and `sqlite3.def`. The same command works for 32-bit and 64-bit builds.
+
+## Statically Linking the TCL Library
+
+Some utilities (for example, `sqlite3_analyzer.exe`) link against TCL. By default the resulting executable depends on `tcl90.dll` being on `%PATH%`. To produce a self-contained executable with TCL statically linked:
+
+<Steps>
+  <Step title="Build the static TCL library">
+    From the TCL source `win\` directory:
+
+    ```bat
+    nmake /f makefile.vc OPTS=static shell
+    ```
+
+    Copy `tcl90s.lib` from the resulting `Release*` subdirectory into `C:\Tcl\lib` (or `C:\tcl32\lib` for 32-bit).
+  </Step>
+
+  <Step title="Build the SQLite utility with STATICALLY_LINK_TCL=1">
+    ```bat
+    nmake /f Makefile.msc STATICALLY_LINK_TCL=1 sqlite3_analyzer.exe
+    ```
+  </Step>
+
+  <Step title="Verify the binary has no TCL DLL dependency">
+    ```bat
+    dumpbin /dependents sqlite3_analyzer.exe
+    ```
+  </Step>
+</Steps>
+
+## Key nmake Targets Reference
+
+| Target | TCL Required | Description |
+|--------|:---:|-------------|
+| `sqlite3.exe` | No | Command-line shell |
+| `sqlite3.c` | No | Generate the amalgamation |
+| `sqldiff.exe` | No | Database diff utility |
+| `sqlite3_rsync.exe` | No | Remote sync utility |
+| `sqlite3.dll` | No | Shared library and `.def` file |
+| `tclextension-install` | Yes | Build and install the SQLite TCL extension |
+| `devtest` | Yes | Standard developer test run |
+| `releasetest` | Yes | Full release validation |
+| `sqlite3_analyzer.exe` | Yes | Database page analysis tool |

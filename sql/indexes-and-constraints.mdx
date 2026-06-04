@@ -1,0 +1,332 @@
+---
+title: "Indexes, Constraints, and Query Optimization in SQLite"
+sidebarTitle: "Indexes"
+description: "How to create and use indexes in SQLite, enforce data integrity with constraints, and use EXPLAIN QUERY PLAN to verify index usage and optimize queries."
+---
+
+Indexes and constraints are the two primary tools for controlling both the performance and the correctness of an SQLite database. Indexes speed up queries; constraints enforce rules on the data. This page covers both in depth, plus how to use `EXPLAIN QUERY PLAN` to verify that SQLite is using your indexes as intended.
+
+## Creating Indexes
+
+### CREATE INDEX
+
+```sql
+-- Basic single-column index
+CREATE INDEX idx_users_email ON users(email);
+
+-- Multi-column (composite) index
+CREATE INDEX idx_orders_user_date ON orders(user_id, created_at DESC);
+
+-- Create only if not already present
+CREATE INDEX IF NOT EXISTS idx_users_score ON users(score);
+```
+
+### CREATE UNIQUE INDEX
+
+A unique index enforces that no two rows may have the same value(s) in the indexed columns (NULLs are considered distinct from each other).
+
+```sql
+CREATE UNIQUE INDEX idx_users_email_unique ON users(email);
+```
+
+### DROP INDEX
+
+```sql
+DROP INDEX IF EXISTS idx_users_email;
+```
+
+---
+
+## Partial Indexes
+
+A partial index includes only rows that satisfy a `WHERE` clause. This makes the index smaller and faster for queries that target the same subset.
+
+```sql
+-- Index only active users
+CREATE INDEX idx_active_users ON users(score)
+WHERE active = 1;
+
+-- Index only orders not yet shipped
+CREATE INDEX idx_pending_orders ON orders(created_at)
+WHERE shipped_at IS NULL;
+```
+
+<Tip>
+For the partial index to be used by the query planner, the query's `WHERE` clause must logically imply the index's `WHERE` clause. Use `EXPLAIN QUERY PLAN` to confirm.
+</Tip>
+
+```sql
+-- This query CAN use idx_pending_orders
+SELECT * FROM orders WHERE shipped_at IS NULL ORDER BY created_at;
+
+-- This cannot (no guarantee shipped_at IS NULL)
+SELECT * FROM orders ORDER BY created_at;
+```
+
+---
+
+## Expression Indexes
+
+An expression index (also called a functional index) indexes the result of an expression rather than a plain column value. This is useful for queries that filter or sort on computed values.
+
+```sql
+-- Case-insensitive email lookup
+CREATE INDEX idx_users_email_lower ON users(LOWER(email));
+
+-- Used by:
+SELECT * FROM users WHERE LOWER(email) = 'alice@example.com';
+
+-- Index on JSON field extraction
+CREATE INDEX idx_meta_region ON events(json_extract(metadata, '$.region'));
+```
+
+<Warning>
+The expression in the query must exactly match the expression in the index for the planner to use it. `LOWER(email)` and `lower(email)` match (case-insensitive function names), but `LOWER(TRIM(email))` would not match `LOWER(email)`.
+</Warning>
+
+---
+
+## Covering Indexes
+
+A covering index includes all columns referenced by a query, meaning SQLite can answer the query entirely from the index B-tree without touching the main table B-tree. This can significantly reduce I/O.
+
+```sql
+-- A query that needs user_id, amount, and status
+SELECT user_id, amount FROM orders WHERE status = 'pending';
+
+-- Covering index for that query (status for filtering, user_id + amount for output)
+CREATE INDEX idx_orders_covering ON orders(status, user_id, amount);
+```
+
+With `EXPLAIN QUERY PLAN` you'll see `USING COVERING INDEX` in the output when this optimization fires.
+
+---
+
+## PRIMARY KEY
+
+Every SQLite table has a `rowid` — a 64-bit signed integer that uniquely identifies each row. Declaring `INTEGER PRIMARY KEY` creates an alias to that rowid, enabling O(1) lookup:
+
+```sql
+CREATE TABLE products (
+  id   INTEGER PRIMARY KEY,   -- alias for rowid; auto-incremented on NULL insert
+  name TEXT NOT NULL,
+  price REAL
+);
+
+-- AUTOINCREMENT prevents rowid reuse (monotonically increasing)
+CREATE TABLE log_entries (
+  id   INTEGER PRIMARY KEY AUTOINCREMENT,
+  msg  TEXT
+);
+```
+
+<Note>
+`INTEGER PRIMARY KEY` and `INTEGER PRIMARY KEY AUTOINCREMENT` behave differently. Without `AUTOINCREMENT`, SQLite may reuse deleted rowids. With it, the rowid is guaranteed to be strictly greater than any ever used — at the cost of maintaining an `sqlite_sequence` table.
+</Note>
+
+Multi-column primary keys are declared as table constraints:
+
+```sql
+CREATE TABLE enrollment (
+  student_id INTEGER,
+  course_id  INTEGER,
+  enrolled_at TEXT,
+  PRIMARY KEY (student_id, course_id)
+);
+```
+
+---
+
+## UNIQUE Constraint
+
+```sql
+CREATE TABLE users (
+  id    INTEGER PRIMARY KEY,
+  email TEXT UNIQUE,             -- column-level unique constraint
+  phone TEXT
+);
+
+-- Table-level composite unique constraint
+CREATE TABLE memberships (
+  user_id INTEGER,
+  club_id INTEGER,
+  UNIQUE (user_id, club_id)
+);
+```
+
+Unique constraints implicitly create an index. Inserting a duplicate raises `SQLITE_CONSTRAINT_UNIQUE`.
+
+---
+
+## NOT NULL Constraint
+
+```sql
+CREATE TABLE orders (
+  id       INTEGER PRIMARY KEY,
+  user_id  INTEGER NOT NULL,
+  amount   REAL    NOT NULL CHECK(amount > 0)
+);
+```
+
+`NOT NULL` columns raise `SQLITE_CONSTRAINT_NOTNULL` on a NULL insert attempt.
+
+---
+
+## CHECK Constraint
+
+`CHECK` constraints evaluate an expression; the insert or update is rejected if the expression returns false (0 or NULL).
+
+```sql
+CREATE TABLE products (
+  id    INTEGER PRIMARY KEY,
+  price REAL CHECK(price >= 0),
+  stock INTEGER CHECK(stock >= 0),
+  rating INTEGER CHECK(rating BETWEEN 1 AND 5)
+);
+
+-- Table-level check spanning multiple columns
+CREATE TABLE flight (
+  depart TEXT,
+  arrive TEXT,
+  CHECK (arrive > depart)
+);
+```
+
+<Note>
+Unlike some databases, SQLite evaluates `CHECK` constraints at the time of insert or update, not at table creation. A `CHECK` violation raises `SQLITE_CONSTRAINT_CHECK`.
+</Note>
+
+---
+
+## DEFAULT Values
+
+```sql
+CREATE TABLE sessions (
+  id         INTEGER PRIMARY KEY,
+  token      TEXT    NOT NULL,
+  created_at TEXT    DEFAULT (datetime('now')),
+  expires_at TEXT    DEFAULT (datetime('now', '+30 days')),
+  active     INTEGER DEFAULT 1
+);
+```
+
+`DEFAULT` can be a literal value or a parenthesised expression.
+
+---
+
+## FOREIGN KEY Constraints
+
+Foreign key enforcement is **disabled by default** in SQLite for backwards compatibility. Enable it per-connection:
+
+```sql
+PRAGMA foreign_keys = ON;
+```
+
+```sql
+CREATE TABLE departments (
+  id   INTEGER PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE employees (
+  id     INTEGER PRIMARY KEY,
+  name   TEXT NOT NULL,
+  dept_id INTEGER REFERENCES departments(id)
+            ON DELETE CASCADE
+            ON UPDATE RESTRICT
+);
+```
+
+Supported referential actions: `NO ACTION` (default), `RESTRICT`, `SET NULL`, `SET DEFAULT`, `CASCADE`.
+
+```sql
+-- Defer foreign key checks to COMMIT time
+PRAGMA defer_foreign_keys = ON;
+
+BEGIN;
+INSERT INTO employees (name, dept_id) VALUES ('Alice', 99); -- dept 99 doesn't exist yet
+INSERT INTO departments (id, name) VALUES (99, 'Engineering');
+COMMIT;  -- FK check happens here; passes because dept 99 now exists
+```
+
+<Warning>
+`PRAGMA foreign_keys = ON` must be set for each new database connection. It is not persisted in the database file.
+</Warning>
+
+---
+
+## EXPLAIN QUERY PLAN
+
+`EXPLAIN QUERY PLAN` is the primary tool for understanding what indexes SQLite uses.
+
+```sql
+-- Create an index and check if it's used
+CREATE INDEX idx_orders_status ON orders(status);
+
+EXPLAIN QUERY PLAN
+SELECT * FROM orders WHERE status = 'pending';
+```
+
+```
+QUERY PLAN
+`--SEARCH orders USING INDEX idx_orders_status (status=?)
+```
+
+### Reading EQPQP Output
+
+| Output phrase | Meaning |
+|---|---|
+| `SCAN table` | Full table scan — no useful index found |
+| `SEARCH table USING INDEX idx` | Used `idx` for equality/range lookup |
+| `SEARCH table USING INTEGER PRIMARY KEY` | rowid lookup (O(1)) |
+| `SEARCH table USING COVERING INDEX idx` | Answered entirely from index |
+| `USE TEMP B-TREE FOR ORDER BY` | Sort step; consider adding an index on ORDER BY columns |
+
+### When SQLite Chooses an Index
+
+SQLite's query planner (the NGQP — Next Generation Query Planner) chooses an index when:
+
+1. The `WHERE` clause contains an equality or range comparison (`=`, `<`, `>`, `BETWEEN`, `IN`) on indexed column(s).
+2. The estimated index lookup cost is lower than a full table scan (based on row-count statistics from `sqlite_stat1`).
+3. For `ORDER BY`, an index whose key sequence matches the sort order can eliminate a sort step.
+
+```sql
+-- Gather statistics so the planner can make better decisions
+ANALYZE;
+
+-- View the gathered stats
+SELECT * FROM sqlite_stat1;
+```
+
+<Accordion title="Forcing or suppressing index use">
+You can override the planner with hints:
+
+```sql
+-- Force a specific index
+SELECT * FROM orders INDEXED BY idx_orders_status WHERE status = 'pending';
+
+-- Prevent index use (force table scan)
+SELECT * FROM orders NOT INDEXED WHERE status = 'pending';
+```
+
+These are hints for debugging; prefer fixing statistics or query structure in production code.
+</Accordion>
+
+---
+
+## Index Usage Summary
+
+<CardGroup cols={2}>
+  <Card title="Equality Lookups" icon="equals">
+    A single-column index on the equality column is the simplest and most effective pattern: `WHERE id = ?` with an index on `id`.
+  </Card>
+  <Card title="Range Scans" icon="arrow-right">
+    Composite indexes should place equality columns first, range column last: `(status, created_at)` for `WHERE status = ? AND created_at > ?`.
+  </Card>
+  <Card title="Covering Indexes" icon="layer-group">
+    Include all `SELECT` and `WHERE` columns in the index to avoid row lookups entirely. Watch the index size vs. write-amplification trade-off.
+  </Card>
+  <Card title="Partial Indexes" icon="filter">
+    Use partial indexes on skewed data (e.g., `WHERE deleted = 0`) to keep the index small and cache-friendly.
+  </Card>
+</CardGroup>

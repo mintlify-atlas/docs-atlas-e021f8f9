@@ -1,0 +1,375 @@
+---
+title: "SQLite Error Codes and Extended Error Codes"
+sidebarTitle: "Error Codes"
+description: "Complete reference for SQLite primary result codes, extended error codes, error-retrieval functions, and idiomatic C error-handling patterns."
+---
+
+Every SQLite C API function that can fail returns an integer result code. Understanding these codes is essential for writing robust database code: a return value of `SQLITE_OK` (zero) indicates success, while any other value signals that something went wrong — or, in the special case of `sqlite3_step()`, that a row is ready (`SQLITE_ROW`) or the statement has finished (`SQLITE_DONE`). SQLite defines 30 primary result codes and a growing set of extended result codes that provide finer-grained diagnostic information.
+
+## Primary Result Codes
+
+The 30 primary codes are defined in `sqlite3.h` between the markers `beginning-of-error-codes` and `end-of-error-codes`. They fit in the low-order 8 bits of any result-code value, which is how extended codes are derived from them.
+
+| Code | Value | Meaning |
+|------|------:|---------|
+| `SQLITE_OK` | 0 | Successful result |
+| `SQLITE_ERROR` | 1 | Generic error |
+| `SQLITE_INTERNAL` | 2 | Internal logic error in SQLite |
+| `SQLITE_PERM` | 3 | Access permission denied |
+| `SQLITE_ABORT` | 4 | Callback routine requested an abort |
+| `SQLITE_BUSY` | 5 | The database file is locked |
+| `SQLITE_LOCKED` | 6 | A table in the database is locked |
+| `SQLITE_NOMEM` | 7 | A `malloc()` failed |
+| `SQLITE_READONLY` | 8 | Attempt to write a read-only database |
+| `SQLITE_INTERRUPT` | 9 | Operation terminated by `sqlite3_interrupt()` |
+| `SQLITE_IOERR` | 10 | Some kind of disk I/O error occurred |
+| `SQLITE_CORRUPT` | 11 | The database disk image is malformed |
+| `SQLITE_NOTFOUND` | 12 | Unknown opcode in `sqlite3_file_control()` |
+| `SQLITE_FULL` | 13 | Insertion failed because the database is full |
+| `SQLITE_CANTOPEN` | 14 | Unable to open the database file |
+| `SQLITE_PROTOCOL` | 15 | Database lock protocol error |
+| `SQLITE_EMPTY` | 16 | Internal use only |
+| `SQLITE_SCHEMA` | 17 | The database schema changed |
+| `SQLITE_TOOBIG` | 18 | String or BLOB exceeds size limit |
+| `SQLITE_CONSTRAINT` | 19 | Abort due to constraint violation |
+| `SQLITE_MISMATCH` | 20 | Data type mismatch |
+| `SQLITE_MISUSE` | 21 | Library used incorrectly |
+| `SQLITE_NOLFS` | 22 | Uses OS features not supported on host |
+| `SQLITE_AUTH` | 23 | Authorization denied |
+| `SQLITE_FORMAT` | 24 | Not used |
+| `SQLITE_RANGE` | 25 | 2nd parameter to `sqlite3_bind` out of range |
+| `SQLITE_NOTADB` | 26 | File opened that is not a database file |
+| `SQLITE_NOTICE` | 27 | Notifications from `sqlite3_log()` |
+| `SQLITE_WARNING` | 28 | Warnings from `sqlite3_log()` |
+| `SQLITE_ROW` | 100 | `sqlite3_step()` has another row ready |
+| `SQLITE_DONE` | 101 | `sqlite3_step()` has finished executing |
+
+<Note>
+  `SQLITE_ROW` and `SQLITE_DONE` are **not** error conditions — they are normal step-execution signals. All other non-zero codes in the table above indicate a failure of some kind.
+</Note>
+
+---
+
+## Extended Result Codes
+
+In its default configuration SQLite returns one of the 30 primary codes. Extended result codes add detail by encoding a sub-category in the higher-order bits while keeping the primary code in the low-order 8 bits:
+
+```c
+extended_code = primary_code | (sub_category << 8)
+```
+
+This means you can always recover the primary code from an extended code with a simple mask:
+
+```c
+int primary = extended_code & 0xFF;
+```
+
+Extended codes are **disabled by default** for historical compatibility. Enable them per-connection with `sqlite3_extended_result_codes()`.
+
+### SQLITE_ERROR extended codes
+
+```c
+#define SQLITE_ERROR_MISSING_COLLSEQ   (SQLITE_ERROR | (1<<8))  /* 257  */
+#define SQLITE_ERROR_RETRY             (SQLITE_ERROR | (2<<8))  /* 513  */
+#define SQLITE_ERROR_SNAPSHOT          (SQLITE_ERROR | (3<<8))  /* 769  */
+#define SQLITE_ERROR_RESERVESIZE       (SQLITE_ERROR | (4<<8))  /* 1025 */
+#define SQLITE_ERROR_KEY               (SQLITE_ERROR | (5<<8))  /* 1281 */
+#define SQLITE_ERROR_UNABLE            (SQLITE_ERROR | (6<<8))  /* 1537 */
+```
+
+### SQLITE_IOERR extended codes
+
+```c
+#define SQLITE_IOERR_READ              (SQLITE_IOERR | (1<<8))
+#define SQLITE_IOERR_SHORT_READ        (SQLITE_IOERR | (2<<8))
+#define SQLITE_IOERR_WRITE             (SQLITE_IOERR | (3<<8))
+#define SQLITE_IOERR_FSYNC             (SQLITE_IOERR | (4<<8))
+#define SQLITE_IOERR_DIR_FSYNC         (SQLITE_IOERR | (5<<8))
+#define SQLITE_IOERR_TRUNCATE          (SQLITE_IOERR | (6<<8))
+#define SQLITE_IOERR_FSTAT             (SQLITE_IOERR | (7<<8))
+#define SQLITE_IOERR_UNLOCK            (SQLITE_IOERR | (8<<8))
+#define SQLITE_IOERR_RDLOCK            (SQLITE_IOERR | (9<<8))
+#define SQLITE_IOERR_DELETE            (SQLITE_IOERR | (10<<8))
+#define SQLITE_IOERR_BLOCKED           (SQLITE_IOERR | (11<<8))
+#define SQLITE_IOERR_NOMEM             (SQLITE_IOERR | (12<<8))
+#define SQLITE_IOERR_ACCESS            (SQLITE_IOERR | (13<<8))
+#define SQLITE_IOERR_CHECKRESERVEDLOCK (SQLITE_IOERR | (14<<8))
+#define SQLITE_IOERR_LOCK              (SQLITE_IOERR | (15<<8))
+#define SQLITE_IOERR_CLOSE             (SQLITE_IOERR | (16<<8))
+#define SQLITE_IOERR_DIR_CLOSE         (SQLITE_IOERR | (17<<8))
+#define SQLITE_IOERR_SHMOPEN           (SQLITE_IOERR | (18<<8))
+#define SQLITE_IOERR_SHMSIZE           (SQLITE_IOERR | (19<<8))
+#define SQLITE_IOERR_SHMLOCK           (SQLITE_IOERR | (20<<8))
+#define SQLITE_IOERR_SHMMAP            (SQLITE_IOERR | (21<<8))
+#define SQLITE_IOERR_SEEK              (SQLITE_IOERR | (22<<8))
+#define SQLITE_IOERR_DELETE_NOENT      (SQLITE_IOERR | (23<<8))
+#define SQLITE_IOERR_MMAP              (SQLITE_IOERR | (24<<8))
+#define SQLITE_IOERR_GETTEMPPATH       (SQLITE_IOERR | (25<<8))
+#define SQLITE_IOERR_CONVPATH          (SQLITE_IOERR | (26<<8))
+#define SQLITE_IOERR_VNODE             (SQLITE_IOERR | (27<<8))
+#define SQLITE_IOERR_AUTH              (SQLITE_IOERR | (28<<8))
+#define SQLITE_IOERR_BEGIN_ATOMIC      (SQLITE_IOERR | (29<<8))
+#define SQLITE_IOERR_COMMIT_ATOMIC     (SQLITE_IOERR | (30<<8))
+#define SQLITE_IOERR_ROLLBACK_ATOMIC   (SQLITE_IOERR | (31<<8))
+#define SQLITE_IOERR_DATA              (SQLITE_IOERR | (32<<8))
+#define SQLITE_IOERR_CORRUPTFS         (SQLITE_IOERR | (33<<8))
+#define SQLITE_IOERR_IN_PAGE           (SQLITE_IOERR | (34<<8))
+#define SQLITE_IOERR_BADKEY            (SQLITE_IOERR | (35<<8))
+#define SQLITE_IOERR_CODEC             (SQLITE_IOERR | (36<<8))
+```
+
+### SQLITE_LOCKED, SQLITE_BUSY, SQLITE_CANTOPEN, SQLITE_CORRUPT extended codes
+
+```c
+#define SQLITE_LOCKED_SHAREDCACHE      (SQLITE_LOCKED |  (1<<8))
+#define SQLITE_LOCKED_VTAB             (SQLITE_LOCKED |  (2<<8))
+
+#define SQLITE_BUSY_RECOVERY           (SQLITE_BUSY   |  (1<<8))
+#define SQLITE_BUSY_SNAPSHOT           (SQLITE_BUSY   |  (2<<8))
+#define SQLITE_BUSY_TIMEOUT            (SQLITE_BUSY   |  (3<<8))
+
+#define SQLITE_CANTOPEN_NOTEMPDIR      (SQLITE_CANTOPEN | (1<<8))
+#define SQLITE_CANTOPEN_ISDIR          (SQLITE_CANTOPEN | (2<<8))
+#define SQLITE_CANTOPEN_FULLPATH       (SQLITE_CANTOPEN | (3<<8))
+#define SQLITE_CANTOPEN_CONVPATH       (SQLITE_CANTOPEN | (4<<8))
+#define SQLITE_CANTOPEN_SYMLINK        (SQLITE_CANTOPEN | (6<<8))
+
+#define SQLITE_CORRUPT_VTAB            (SQLITE_CORRUPT | (1<<8))
+#define SQLITE_CORRUPT_SEQUENCE        (SQLITE_CORRUPT | (2<<8))
+#define SQLITE_CORRUPT_INDEX           (SQLITE_CORRUPT | (3<<8))
+```
+
+### SQLITE_READONLY extended codes
+
+```c
+#define SQLITE_READONLY_RECOVERY       (SQLITE_READONLY | (1<<8))
+#define SQLITE_READONLY_CANTLOCK       (SQLITE_READONLY | (2<<8))
+#define SQLITE_READONLY_ROLLBACK       (SQLITE_READONLY | (3<<8))
+#define SQLITE_READONLY_DBMOVED        (SQLITE_READONLY | (4<<8))
+#define SQLITE_READONLY_CANTINIT       (SQLITE_READONLY | (5<<8))
+#define SQLITE_READONLY_DIRECTORY      (SQLITE_READONLY | (6<<8))
+```
+
+### SQLITE_ABORT, SQLITE_CONSTRAINT extended codes
+
+```c
+#define SQLITE_ABORT_ROLLBACK          (SQLITE_ABORT | (2<<8))
+
+#define SQLITE_CONSTRAINT_CHECK        (SQLITE_CONSTRAINT | (1<<8))
+#define SQLITE_CONSTRAINT_COMMITHOOK   (SQLITE_CONSTRAINT | (2<<8))
+#define SQLITE_CONSTRAINT_FOREIGNKEY   (SQLITE_CONSTRAINT | (3<<8))
+#define SQLITE_CONSTRAINT_FUNCTION     (SQLITE_CONSTRAINT | (4<<8))
+#define SQLITE_CONSTRAINT_NOTNULL      (SQLITE_CONSTRAINT | (5<<8))
+#define SQLITE_CONSTRAINT_PRIMARYKEY   (SQLITE_CONSTRAINT | (6<<8))
+#define SQLITE_CONSTRAINT_TRIGGER      (SQLITE_CONSTRAINT | (7<<8))
+#define SQLITE_CONSTRAINT_UNIQUE       (SQLITE_CONSTRAINT | (8<<8))
+#define SQLITE_CONSTRAINT_VTAB         (SQLITE_CONSTRAINT | (9<<8))
+#define SQLITE_CONSTRAINT_ROWID        (SQLITE_CONSTRAINT | (10<<8))
+#define SQLITE_CONSTRAINT_PINNED       (SQLITE_CONSTRAINT | (11<<8))
+#define SQLITE_CONSTRAINT_DATATYPE     (SQLITE_CONSTRAINT | (12<<8))
+```
+
+### SQLITE_NOTICE, SQLITE_WARNING, SQLITE_OK, SQLITE_AUTH extended codes
+
+```c
+#define SQLITE_NOTICE_RECOVER_WAL      (SQLITE_NOTICE | (1<<8))
+#define SQLITE_NOTICE_RECOVER_ROLLBACK (SQLITE_NOTICE | (2<<8))
+#define SQLITE_NOTICE_RBU              (SQLITE_NOTICE | (3<<8))
+
+#define SQLITE_WARNING_AUTOINDEX       (SQLITE_WARNING | (1<<8))
+
+#define SQLITE_AUTH_USER               (SQLITE_AUTH | (1<<8))
+
+#define SQLITE_OK_LOAD_PERMANENTLY     (SQLITE_OK | (1<<8))
+```
+
+---
+
+## Error-Retrieval Functions
+
+Once a call fails, four functions let you extract a human-readable description and structural information about what went wrong.
+
+<Tabs>
+  <Tab title="sqlite3_errcode">
+    ```c
+    int sqlite3_errcode(sqlite3 *db);
+    ```
+    Returns the numeric result code for the most recently failed API call on the database connection `db`. If extended result codes are disabled (the default), this returns a primary code. The value may change after each subsequent API call.
+  </Tab>
+  <Tab title="sqlite3_extended_errcode">
+    ```c
+    int sqlite3_extended_errcode(sqlite3 *db);
+    ```
+    Always returns the extended result code for the most recent failure, regardless of whether extended codes are enabled on the connection. Use this when you need the finest-grained diagnostic available.
+  </Tab>
+  <Tab title="sqlite3_errmsg">
+    ```c
+    const char *sqlite3_errmsg(sqlite3 *db);
+    ```
+    Returns an English-language UTF-8 string describing the most recent error, or `NULL` if no message is available. The memory is managed internally and may be overwritten by subsequent SQLite calls — copy the string if you need to retain it.
+  </Tab>
+  <Tab title="sqlite3_errstr">
+    ```c
+    const char *sqlite3_errstr(int rc);
+    ```
+    Maps a result code to its canonical English description without requiring a database connection. Useful for logging errors after a connection has been closed.
+  </Tab>
+  <Tab title="sqlite3_error_offset">
+    ```c
+    int sqlite3_error_offset(sqlite3 *db);
+    ```
+    When the most recent error references a specific token in the input SQL, returns the byte offset of that token within the UTF-8 SQL string. Returns `-1` if the error does not correspond to a particular token.
+  </Tab>
+</Tabs>
+
+---
+
+## Enabling Extended Result Codes
+
+```c
+int sqlite3_extended_result_codes(sqlite3 *db, int onoff);
+```
+
+Extended result codes are **disabled by default** for historical compatibility. Call `sqlite3_extended_result_codes(db, 1)` immediately after opening a connection to enable them. Pass `0` to disable them again.
+
+```c
+sqlite3 *db;
+sqlite3_open("data.db", &db);
+
+/* Enable extended codes for this connection */
+sqlite3_extended_result_codes(db, 1);
+```
+
+Once enabled, `sqlite3_errcode()` and `sqlite3_step()` will return extended codes. `sqlite3_extended_errcode()` always returns extended codes regardless of this setting.
+
+<Tip>
+  Alternatively, pass the `SQLITE_OPEN_EXRESCODE` flag to `sqlite3_open_v2()` to enable extended result codes from the moment the connection is opened, without a separate call.
+</Tip>
+
+---
+
+## Checking for Success
+
+The canonical idiom for checking any SQLite call is a comparison against `SQLITE_OK`:
+
+```c
+int rc = sqlite3_some_function(...);
+if (rc != SQLITE_OK) {
+    /* handle error */
+}
+```
+
+For `sqlite3_step()`, check for both `SQLITE_ROW` and `SQLITE_DONE`:
+
+```c
+int rc;
+while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    /* process row */
+}
+if (rc != SQLITE_DONE) {
+    /* an actual error occurred */
+    fprintf(stderr, "sqlite3_step error: %s\n", sqlite3_errmsg(db));
+}
+```
+
+---
+
+## Common Error-Handling Patterns
+
+### Pattern 1 — Fail fast with cleanup
+
+```c
+static int exec_sql(sqlite3 *db, const char *sql) {
+    sqlite3_stmt *stmt = NULL;
+    int rc;
+
+    rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "prepare failed (%d): %s\n", rc, sqlite3_errmsg(db));
+        return rc;
+    }
+
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+        fprintf(stderr, "step failed (%d): %s\n", rc, sqlite3_errmsg(db));
+    }
+
+    sqlite3_finalize(stmt);
+    return (rc == SQLITE_DONE || rc == SQLITE_ROW) ? SQLITE_OK : rc;
+}
+```
+
+### Pattern 2 — Retry on SQLITE_BUSY
+
+`SQLITE_BUSY` means another connection holds a lock. A common approach is to retry with a small delay rather than failing immediately:
+
+```c
+int rc;
+int attempts = 0;
+
+do {
+    rc = sqlite3_step(stmt);
+    if (rc == SQLITE_BUSY) {
+        /* sqlite3_sleep() is built into SQLite */
+        sqlite3_sleep(10);   /* wait 10 ms */
+        sqlite3_reset(stmt); /* reset before retrying */
+    }
+} while (rc == SQLITE_BUSY && ++attempts < 50);
+
+if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+    fprintf(stderr, "Error %d: %s\n", rc, sqlite3_errmsg(db));
+}
+```
+
+<Tip>
+  For most use cases, `sqlite3_busy_timeout(db, milliseconds)` is a simpler alternative: SQLite will automatically retry internally for up to the specified duration before returning `SQLITE_BUSY` to the caller.
+</Tip>
+
+### Pattern 3 — Decode extended codes
+
+```c
+void log_error(sqlite3 *db) {
+    int ext  = sqlite3_extended_errcode(db);
+    int prim = ext & 0xFF;          /* low 8 bits = primary code */
+
+    fprintf(stderr, "Primary: %d (%s)\n", prim, sqlite3_errstr(prim));
+    fprintf(stderr, "Extended: %d (%s)\n", ext,  sqlite3_errstr(ext));
+    fprintf(stderr, "Message:  %s\n",           sqlite3_errmsg(db));
+
+    /* Report the approximate location in the SQL, if available */
+    int offset = sqlite3_error_offset(db);
+    if (offset >= 0) {
+        fprintf(stderr, "SQL offset: %d\n", offset);
+    }
+}
+```
+
+### Pattern 4 — Constraint violation handling
+
+When inserting or updating data, distinguish between different kinds of constraint failures using the extended code:
+
+```c
+rc = sqlite3_step(stmt);
+if (rc != SQLITE_DONE) {
+    int ext = sqlite3_extended_errcode(db);
+    switch (ext) {
+        case SQLITE_CONSTRAINT_UNIQUE:
+            /* duplicate key — handle gracefully */
+            break;
+        case SQLITE_CONSTRAINT_FOREIGNKEY:
+            /* referential integrity violation */
+            break;
+        case SQLITE_CONSTRAINT_NOTNULL:
+            /* NULL inserted into NOT NULL column */
+            break;
+        default:
+            fprintf(stderr, "Unexpected error %d: %s\n",
+                    ext, sqlite3_errmsg(db));
+            break;
+    }
+}
+```
+
+<Warning>
+  If an interface returns `SQLITE_MISUSE`, the library was called incorrectly by the application (e.g., using a finalized statement). In this case the error code and message **may or may not** be set — do not rely on `sqlite3_errmsg()` for a reliable diagnostic.
+</Warning>

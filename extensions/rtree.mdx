@@ -1,0 +1,235 @@
+---
+title: "R-Tree Spatial Index Extension for SQLite"
+sidebarTitle: "R-Tree"
+description: "Use SQLite's R-Tree virtual table for fast bounding-box spatial queries, auxiliary data columns, and polygon queries with the Geopoly companion extension."
+---
+
+The R-Tree extension provides a spatial index for SQLite using the R-Tree and R\*-Tree algorithms. It is designed for efficiently answering bounding-box queries — finding all rectangles (or hyperrectangles in up to five dimensions) that overlap or are contained within a given search region. Typical use cases include geographic bounding boxes, collision detection, and any scenario where you need to query multi-dimensional coordinate ranges rapidly. Enable it at compile time with `-DSQLITE_ENABLE_RTREE`.
+
+## How R-Tree Indexes Work
+
+Internally, an R-Tree virtual table stores its data in three SQLite shadow tables named `<table>_node`, `<table>_parent`, and `<table>_rowid`. The R-Tree structure groups nearby bounding boxes together in a hierarchy so that large regions of the index can be skipped during a query. This makes spatial lookups significantly faster than a full table scan using inequality predicates on regular indexed columns.
+
+From `rtree.c`:
+
+> The data structure for a single virtual r-tree table is stored in three native SQLite tables. The root node always exists, even if the r-tree table is empty. The nodeno of the root node is always 1.
+
+Each entry in the tree consists of a 64-bit integer row identifier followed by pairs of coordinates describing a bounding box.
+
+## Creating an R-Tree Table
+
+The first column is always the integer primary key (the row ID). The remaining columns come in pairs: `minX, maxX`, `minY, maxY`, and so on. You may define between 1 and 5 coordinate dimensions (2–10 coordinate columns):
+
+```sql
+-- 2D bounding box (most common)
+CREATE VIRTUAL TABLE geo USING rtree(
+  id,           -- Integer primary key
+  minLon, maxLon,  -- Longitude range
+  minLat, maxLat   -- Latitude range
+);
+
+-- 3D bounding box
+CREATE VIRTUAL TABLE volumes USING rtree(
+  id,
+  x0, x1,
+  y0, y1,
+  z0, z1
+);
+```
+
+<Warning>
+  R-Tree coordinates are stored as 32-bit IEEE 754 floating-point values by
+  default. If you need integer-only coordinates, compile with
+  `-DSQLITE_RTREE_INT_ONLY`. For higher precision, store the full-precision
+  values in a separate shadow table using auxiliary columns.
+</Warning>
+
+## Inserting Spatial Data
+
+Insert rows just like a regular table. The min value must not be greater than the max value for any dimension:
+
+```sql
+-- Bounding boxes for city districts
+INSERT INTO geo(id, minLon, maxLon, minLat, maxLat) VALUES
+  (1, -122.52, -122.35, 37.70, 37.81),  -- San Francisco
+  (2,  -87.94,  -87.52, 41.64, 42.02),  -- Chicago
+  (3,  -74.26,  -73.70, 40.50, 40.92),  -- New York City
+  (4, -118.67, -118.15, 33.70, 34.34);  -- Los Angeles
+```
+
+## Querying Spatial Data
+
+### Overlap Queries
+
+Find all entries whose bounding box overlaps with a given search rectangle by comparing coordinate columns directly:
+
+```sql
+-- Find all districts overlapping the query region
+SELECT id FROM geo
+WHERE maxLon >= -123.0 AND minLon <= -122.0
+  AND maxLat >=   37.5 AND minLat <=  38.0;
+-- Returns: 1 (San Francisco)
+```
+
+SQLite's query planner recognises these inequality patterns and uses the R-Tree index automatically.
+
+### Containment Queries
+
+Find rows whose bounding box is fully contained within a search region:
+
+```sql
+-- Bounding boxes entirely within the western US
+SELECT id FROM geo
+WHERE minLon >= -125.0 AND maxLon <= -115.0
+  AND minLat >=   32.0 AND maxLat <=  42.0;
+-- Returns: 1 (San Francisco), 4 (Los Angeles)
+```
+
+### Point-in-Rectangle Queries
+
+Check whether a specific point falls inside any bounding box:
+
+```sql
+-- Which district contains the point (-122.42, 37.77)?
+SELECT id FROM geo
+WHERE minLon <= -122.42 AND maxLon >= -122.42
+  AND minLat <=   37.77 AND maxLat >=  37.77;
+-- Returns: 1 (San Francisco)
+```
+
+## Auxiliary Columns
+
+Standard R-Tree tables store only the integer ID and the coordinates. **Auxiliary columns** allow you to attach extra data to each entry without maintaining a separate join table. Auxiliary columns are declared with a `+` prefix:
+
+```sql
+CREATE VIRTUAL TABLE places USING rtree(
+  id,
+  minLon, maxLon,
+  minLat, maxLat,
+  +name TEXT,       -- Auxiliary: place name
+  +population INT   -- Auxiliary: population count
+);
+
+INSERT INTO places VALUES
+  (1, -122.52, -122.35, 37.70, 37.81, 'San Francisco', 874961),
+  (2,  -87.94,  -87.52, 41.64, 42.02, 'Chicago',       2696555);
+
+-- Query with auxiliary data returned directly
+SELECT name, population
+FROM places
+WHERE maxLon >= -123.0 AND minLon <= -122.0
+  AND maxLat >=  37.5  AND minLat <=  38.0;
+-- San Francisco | 874961
+```
+
+<Note>
+  Auxiliary column values are stored in the `%_rowid` shadow table, not in the
+  R-Tree index itself. They are not used to prune the spatial search — only
+  the coordinate columns influence the traversal of the tree.
+</Note>
+
+## Updating and Deleting Entries
+
+R-Tree rows are updated and deleted using standard SQL:
+
+```sql
+-- Update the bounding box for entry 1
+UPDATE geo
+SET minLon = -122.55, maxLon = -122.30
+WHERE id = 1;
+
+-- Delete an entry
+DELETE FROM geo WHERE id = 3;
+```
+
+## The Geopoly Extension
+
+Geopoly is a companion extension (enabled with `-DSQLITE_ENABLE_GEOPOLY` together with `-DSQLITE_ENABLE_RTREE`) that extends R-Tree with polygon-based queries. Instead of axis-aligned bounding boxes, Geopoly represents regions as arbitrary polygons encoded as JSON arrays of `[x, y]` pairs.
+
+```sql
+CREATE VIRTUAL TABLE shapes USING geopoly(label);
+
+-- Polygons are stored as JSON [[x1,y1],[x2,y2],...]
+INSERT INTO shapes(label, _shape) VALUES
+  ('triangle', '[[0,0],[10,0],[5,10],[0,0]]'),
+  ('square',   '[[0,0],[10,0],[10,10],[0,10],[0,0]]');
+
+-- Find shapes that overlap a query polygon
+SELECT label FROM shapes
+WHERE geopoly_overlap(_shape, '[[4,4],[6,4],[6,6],[4,6],[4,4]]');
+
+-- Test whether a point is inside a shape
+SELECT label FROM shapes
+WHERE geopoly_contains_point(_shape, 5.0, 5.0);
+```
+
+Geopoly stores shapes using their bounding boxes in the underlying R-Tree index for fast filtering, then applies exact polygon intersection tests for accurate results.
+
+## Performance Characteristics
+
+<Accordion title="When R-Tree is faster than a regular index">
+  A regular B-Tree index on `(minLon, maxLon, minLat, maxLat)` cannot efficiently
+  answer overlap queries because the multi-column inequality condition does not
+  allow index range scans on more than one dimension at a time. The R-Tree
+  index prunes entire subtrees of the spatial hierarchy in a single step,
+  making overlap queries significantly faster — often orders of magnitude —
+  when the result set is small relative to the total number of rows.
+</Accordion>
+
+<Accordion title="Coordinate precision">
+  Coordinates are stored as 32-bit floats (approximately 7 significant decimal
+  digits). For geographic longitude/latitude data this is usually sufficient,
+  but if you need sub-centimetre precision, store exact values in an auxiliary
+  column or a joined regular table and use the R-Tree only for coarse
+  filtering.
+</Accordion>
+
+<Accordion title="Maximum dimensions">
+  The R-Tree module supports 1 to 5 dimensions (2 to 10 coordinate columns).
+  Higher-dimensional indexes are less efficient because bounding boxes overlap
+  more — the "curse of dimensionality" applies. For more than three dimensions,
+  consider reducing dimensionality before indexing.
+</Accordion>
+
+## Complete Working Example
+
+```sql
+-- Store bounding boxes of retail stores
+CREATE VIRTUAL TABLE stores USING rtree(
+  id,
+  minLon, maxLon,
+  minLat, maxLat,
+  +name    TEXT,
+  +address TEXT
+);
+
+INSERT INTO stores VALUES
+  (101, -122.421, -122.419, 37.774, 37.776, 'Market St Store',  '100 Market St'),
+  (102, -122.415, -122.413, 37.780, 37.782, 'Union Square',     '200 Post St'),
+  (103, -122.445, -122.443, 37.801, 37.803, 'Marina Store',     '300 Chestnut St'),
+  (104, -122.390, -122.388, 37.760, 37.762, 'Mission Store',    '400 Valencia St');
+
+-- Find stores within a 0.02-degree bounding box around a map viewport
+SELECT id, name, address
+FROM stores
+WHERE minLon >= -122.45 AND maxLon <= -122.40
+  AND minLat >=   37.79 AND maxLat <=  37.82;
+-- Returns: 103 | Marina Store | 300 Chestnut St
+
+-- Find the closest stores to a point by approximate bounding-box distance
+SELECT id, name,
+       ((minLon + maxLon) / 2.0 - (-122.42)) * ((minLon + maxLon) / 2.0 - (-122.42))
+       + ((minLat + maxLat) / 2.0 - (37.775)) * ((minLat + maxLat) / 2.0 - (37.775))
+       AS approx_dist_sq
+FROM stores
+WHERE minLon >= -122.50 AND maxLon <= -122.35
+  AND minLat >=  37.72  AND maxLat <=  37.83
+ORDER BY approx_dist_sq
+LIMIT 3;
+```
+
+<Tip>
+  For large geographic datasets, combine the R-Tree with a regular table: use
+  the R-Tree for fast spatial filtering to get a small candidate set, then join
+  to the regular table for exact attribute filtering and retrieval.
+</Tip>

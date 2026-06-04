@@ -1,0 +1,246 @@
+---
+title: "sqldiff: Compare and Sync SQLite Database Files"
+sidebarTitle: "sqldiff"
+description: "sqldiff generates SQL statements that transform one SQLite database into another, enabling migrations, auditing, and incremental synchronization."
+---
+
+`sqldiff` is a command-line utility that compares two SQLite database files and outputs the SQL statements needed to transform the first database into the second. The output consists of `INSERT`, `UPDATE`, and `DELETE` statements for data differences and `CREATE`/`DROP` statements for schema differences—making `sqldiff` useful for generating migration scripts, auditing changes between database snapshots, and producing incremental synchronization patches.
+
+## Building sqldiff
+
+<Tabs>
+  <Tab title="Unix / macOS">
+    TCL is **not** required to build `sqldiff`.
+
+    ```bash
+    # Unpack sources and create a build directory
+    tar xzf sqlite.tar.gz
+    mkdir bld && cd bld
+
+    # Configure and build
+    ../sqlite/configure
+    make sqldiff
+    ```
+  </Tab>
+  <Tab title="Windows / MSVC">
+    ```bat
+    make sqldiff.exe
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Basic Usage
+
+```bash
+sqldiff DB1 DB2
+```
+
+`sqldiff` outputs SQL to **stdout** that, when applied to `DB1`, produces a database equivalent to `DB2`.
+
+```bash
+# Show all differences between two database files
+sqldiff old.db new.db
+
+# Save the diff script to a file
+sqldiff old.db new.db > migration.sql
+
+# Apply the migration
+sqlite3 old.db < migration.sql
+```
+
+<Note>
+  `sqldiff` outputs SQL text intended to be applied to `DB1`. It does **not** modify either database file.
+</Note>
+
+---
+
+## Command-Line Options
+
+```text
+Usage: sqldiff [options] DB1 DB2
+```
+
+| Option | Effect |
+|--------|--------|
+| `--changeset FILE` | Write a binary changeset into FILE instead of SQL text |
+| `-L FILE` / `--lib FILE` | Load an SQLite extension library before opening the databases |
+| `--primarykey` | Use the schema-defined `PRIMARY KEY` instead of the true (rowid-based) primary key |
+| `--rbu` | Output SQL to create and populate RBU (Resumable Bulk Update) tables |
+| `--schema` | Show only schema differences; ignore row-level data |
+| `--summary` | Show only a summary of the differences |
+| `--table TAB` | Limit comparison to a single table named TAB |
+| `--transaction` | Wrap the SQL output in a `BEGIN`/`COMMIT` transaction |
+| `--vtab` | Handle `fts3`, `fts4`, `fts5`, and `rtree` virtual tables |
+
+---
+
+## Common Use Cases
+
+<Accordion title="Comparing Specific Tables">
+  Use `--table` to limit the diff to a single table when you only care about changes in one part of the schema.
+
+  ```bash
+  # Show only changes in the 'orders' table
+  sqldiff --table orders snapshot1.db snapshot2.db
+  ```
+
+  The output contains only `INSERT`, `UPDATE`, and `DELETE` statements for rows in `orders`.
+</Accordion>
+
+<Accordion title="Schema-Only Diff">
+  Pass `--schema` to compare `CREATE TABLE`, `CREATE INDEX`, and similar DDL statements while ignoring all row data. This is useful for auditing schema evolution between releases.
+
+  ```bash
+  sqldiff --schema v1.db v2.db
+  ```
+
+  Example output:
+  ```sql
+  CREATE INDEX idx_orders_customer ON orders(customer_id);
+  ALTER TABLE users ADD COLUMN last_login TEXT;
+  ```
+
+  <Warning>
+    The `--schema` and `--table` options are mutually exclusive. Using both together produces an error.
+  </Warning>
+</Accordion>
+
+<Accordion title="Generating a Migration Script">
+  Capture a baseline snapshot of your database before a deployment, then run the new application version, and use `sqldiff` to generate the exact SQL that was applied.
+
+  ```bash
+  # Before deployment
+  cp production.db before.db
+
+  # ... deploy and run application ...
+
+  # Generate the migration
+  sqldiff before.db production.db > changes.sql
+
+  # Inspect and apply to a staging replica
+  sqlite3 staging.db < changes.sql
+  ```
+</Accordion>
+
+<Accordion title="Using Schema-Defined Primary Keys">
+  By default, `sqldiff` uses the true primary key of each table—the `rowid` for ordinary tables and the declared `PRIMARY KEY` for `WITHOUT ROWID` tables. Pass `--primarykey` to force `sqldiff` to use the schema-defined `PRIMARY KEY` in all cases.
+
+  This is useful when comparing tables that were populated independently and therefore have different rowids for logically identical rows.
+
+  ```bash
+  sqldiff --primarykey db1.db db2.db
+  ```
+
+  <Note>
+    When `--primarykey` is active, rows that have `NULL` in any primary key column are excluded from the analysis.
+  </Note>
+</Accordion>
+
+<Accordion title="Wrapping Output in a Transaction">
+  Use `--transaction` to wrap the entire SQL output in a single `BEGIN`/`COMMIT` block. This makes applying the diff atomic and faster on large changesets.
+
+  ```bash
+  sqldiff --transaction old.db new.db > atomic_migration.sql
+  ```
+
+  ```sql
+  BEGIN;
+  DELETE FROM sessions WHERE rowid=42;
+  UPDATE users SET last_login='2024-03-15' WHERE rowid=7;
+  INSERT INTO orders(customer_id, total) VALUES(3, 99.99);
+  COMMIT;
+  ```
+</Accordion>
+
+---
+
+## RBU (Resumable Bulk Update) Output
+
+The `--rbu` flag changes the output format from plain SQL DML statements to a set of RBU staging tables. RBU (Resumable Bulk Update) is an SQLite extension designed to apply large updates to a database incrementally—the operation can be paused and resumed without corruption, making it suitable for embedded systems where the update process might be interrupted.
+
+```bash
+sqldiff --rbu old.db new.db > rbu_patch.sql
+```
+
+### How RBU Output Works
+
+Instead of `INSERT`/`UPDATE`/`DELETE` statements, `sqldiff --rbu` emits `CREATE TABLE` and `INSERT` statements that populate shadow tables following RBU naming conventions. For each modified table `T`, a corresponding `data_T` staging table is created.
+
+A special `rbu_count` table is also emitted to record the number of rows in each staging table:
+
+```sql
+CREATE TABLE IF NOT EXISTS rbu_count(tbl TEXT PRIMARY KEY, cnt INTEGER);
+```
+
+Each data staging table has columns mirroring those of the original table plus an `rbu_control` column that encodes whether each row is an insert, update, or delete. For tables that lack an explicit `INTEGER PRIMARY KEY`, an `rbu_rowid` column is added to carry the rowid.
+
+```sql
+-- Example RBU staging table for a 'notes' table
+CREATE TABLE data_notes(id INTEGER, body TEXT, created_at TEXT, rbu_control);
+INSERT INTO data_notes VALUES(5, 'Updated note', '2024-03-15', '.');
+INSERT INTO data_notes VALUES(6, NULL, NULL, 'd');
+INSERT INTO rbu_count VALUES('data_notes', 2);
+```
+
+<Tip>
+  See the [SQLite RBU documentation](https://sqlite.org/rbu.html) for details on applying an RBU patch using the `sqlite3rbu` API or the `sqlite3 --rbu` command-line option.
+</Tip>
+
+---
+
+## Binary Changeset Output
+
+The `--changeset FILE` option writes a compact binary changeset to FILE rather than SQL text. Binary changesets are the native format used by the SQLite Session extension and can be applied using the `sqlite3changeset_apply()` C API or inverted using `sqlite3changeset_invert()`.
+
+```bash
+# Produce a binary changeset
+sqldiff --changeset delta.cs before.db after.db
+
+# The changeset can be applied programmatically via sqlite3changeset_apply()
+```
+
+<Note>
+  Binary changesets produced by `--changeset` are not human-readable. Use the plain SQL output (no flag) when you need an inspectable, editable migration script.
+</Note>
+
+---
+
+## Example: Auditing a Schema Migration
+
+<Steps>
+  <Step title="Snapshot the database before migration">
+    ```bash
+    cp app.db app_before.db
+    ```
+  </Step>
+  <Step title="Run the migration">
+    ```bash
+    sqlite3 app.db < migrations/0042_add_tags.sql
+    ```
+  </Step>
+  <Step title="Diff schema to verify changes">
+    ```bash
+    sqldiff --schema app_before.db app.db
+    ```
+
+    Expected output:
+    ```sql
+    CREATE TABLE tags(id INTEGER PRIMARY KEY, name TEXT UNIQUE);
+    CREATE TABLE note_tags(note_id INTEGER REFERENCES notes(id),
+                           tag_id  INTEGER REFERENCES tags(id));
+    CREATE INDEX idx_note_tags_note ON note_tags(note_id);
+    ```
+  </Step>
+  <Step title="Diff data to confirm seeded rows">
+    ```bash
+    sqldiff --table tags app_before.db app.db
+    ```
+
+    ```sql
+    INSERT INTO "tags"(rowid,"id","name") VALUES(1,1,'sqlite');
+    INSERT INTO "tags"(rowid,"id","name") VALUES(2,2,'performance');
+    ```
+  </Step>
+</Steps>

@@ -1,0 +1,238 @@
+---
+title: "Reading Query Results with sqlite3_column_* Functions"
+sidebarTitle: "Reading Results"
+description: "A complete guide to extracting typed column values from SQLite prepared statements using the sqlite3_column_* and sqlite3_value_* families of functions."
+---
+
+After `sqlite3_step()` returns `SQLITE_ROW`, your prepared statement is pointing at a live row of result data. SQLite exposes that data through the `sqlite3_column_*` family of functions, which let you pull individual column values out as integers, floats, text, BLOBs, or raw `sqlite3_value` objects. Every accessor takes a zero-based column index, and automatic type coercion is performed when the requested type differs from the stored type — but reading the natural type first is always the safest approach.
+
+## Column Indexing and Counting
+
+Columns in a result row are numbered from **0** (leftmost) to `N-1`. Use `sqlite3_column_count()` to discover `N` before iterating.
+
+```c
+int sqlite3_column_count(sqlite3_stmt *pStmt);
+```
+
+<ParamField path="pStmt" type="sqlite3_stmt*" required>
+  The prepared statement returned by `sqlite3_prepare_v2()` or a related function. Returns `0` for statements that produce no rows (e.g. `UPDATE`).
+</ParamField>
+
+To get the number of columns in the **current row** specifically (non-zero only after `sqlite3_step()` returns `SQLITE_ROW`):
+
+```c
+int sqlite3_data_count(sqlite3_stmt *pStmt);
+```
+
+## Retrieving Column Names
+
+```c
+const char *sqlite3_column_name(sqlite3_stmt*, int N);
+const void *sqlite3_column_name16(sqlite3_stmt*, int N);
+```
+
+`sqlite3_column_name()` returns a zero-terminated UTF-8 string. If an `AS` alias was used, the alias is the name; otherwise the name is unspecified. The returned pointer is valid until the statement is finalized, the statement is reset and re-stepped, or a subsequent call to `sqlite3_column_name()` on the same column.
+
+<Note>
+  If `sqlite3_malloc()` fails during a UTF-8 ↔ UTF-16 conversion, `NULL` is returned. Always check for `NULL` before dereferencing the pointer.
+</Note>
+
+## Inspecting the Column Type
+
+```c
+int sqlite3_column_type(sqlite3_stmt*, int iCol);
+```
+
+Returns the **initial** datatype code of the value in column `iCol`. Possible return values:
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `SQLITE_INTEGER` | `1` | 64-bit signed integer |
+| `SQLITE_FLOAT` | `2` | 64-bit IEEE floating-point |
+| `SQLITE_TEXT` | `3` | UTF-8 / UTF-16 string |
+| `SQLITE_BLOB` | `4` | Raw binary data |
+| `SQLITE_NULL` | `5` | SQL NULL |
+
+<Warning>
+  Once you call any type-converting accessor (e.g. `sqlite3_column_text()` on an integer column), the value stored internally may be mutated. Subsequent calls to `sqlite3_column_type()` on the same column may return a different code. Check the type **before** extracting a value if the original type matters.
+</Warning>
+
+## Type-Specific Value Accessors
+
+These functions form the core of the column-reading API. Each returns the value in column `iCol` of the current row, coercing to the requested type when necessary.
+
+<Tabs>
+  <Tab title="Integer">
+    ```c
+    int           sqlite3_column_int(sqlite3_stmt*, int iCol);
+    sqlite3_int64 sqlite3_column_int64(sqlite3_stmt*, int iCol);
+    ```
+    Use `sqlite3_column_int64()` whenever the value may exceed `INT_MAX` or fall below `INT_MIN`.
+  </Tab>
+  <Tab title="Float">
+    ```c
+    double sqlite3_column_double(sqlite3_stmt*, int iCol);
+    ```
+    Numeric strings are parsed with `strtod()`-style rules.
+  </Tab>
+  <Tab title="Text">
+    ```c
+    const unsigned char *sqlite3_column_text(sqlite3_stmt*, int iCol);   /* UTF-8  */
+    const void          *sqlite3_column_text16(sqlite3_stmt*, int iCol); /* UTF-16 */
+    ```
+    Returned strings are always zero-terminated. Call `sqlite3_column_bytes()` (or `sqlite3_column_bytes16()`) **immediately after** to get the byte length before making any further API calls that could invalidate the pointer.
+  </Tab>
+  <Tab title="BLOB">
+    ```c
+    const void *sqlite3_column_blob(sqlite3_stmt*, int iCol);
+    ```
+    Returns a pointer to the raw bytes. For a zero-length BLOB the return value is `NULL`. Always pair with `sqlite3_column_bytes()`.
+  </Tab>
+</Tabs>
+
+### Byte-Length Functions
+
+```c
+int sqlite3_column_bytes(sqlite3_stmt*, int iCol);   /* bytes in BLOB or UTF-8 text */
+int sqlite3_column_bytes16(sqlite3_stmt*, int iCol); /* bytes in BLOB or UTF-16 text */
+```
+
+<Warning>
+  Do **not** mix `sqlite3_column_blob()` or `sqlite3_column_text()` with `sqlite3_column_bytes16()`, and do not mix `sqlite3_column_text16()` with `sqlite3_column_bytes()`. The byte-count functions may trigger an encoding conversion that invalidates the pointer returned by the text/blob accessor.
+
+  Safe patterns:
+  - `sqlite3_column_text()` → `sqlite3_column_bytes()`
+  - `sqlite3_column_blob()` → `sqlite3_column_bytes()`
+  - `sqlite3_column_text16()` → `sqlite3_column_bytes16()`
+</Warning>
+
+### Getting an Unprotected `sqlite3_value*`
+
+```c
+sqlite3_value *sqlite3_column_value(sqlite3_stmt*, int iCol);
+```
+
+Returns an **unprotected** `sqlite3_value` object. In a multi-threaded program, an unprotected value is only safe to pass directly to `sqlite3_bind_value()` or `sqlite3_result_value()`. Using it with `sqlite3_value_int()` and friends from outside an application-defined function is not thread-safe.
+
+## Type Coercion Table
+
+When you call an accessor whose type differs from the stored type, SQLite applies the following conversions automatically:
+
+| Stored Type | Requested Type | Result |
+|---|---|---|
+| `NULL` | `INTEGER` | `0` |
+| `NULL` | `FLOAT` | `0.0` |
+| `NULL` | `TEXT` | `NULL` pointer |
+| `NULL` | `BLOB` | `NULL` pointer |
+| `INTEGER` | `FLOAT` | Convert integer → float |
+| `INTEGER` | `TEXT` | ASCII rendering of the integer |
+| `FLOAT` | `INTEGER` | `CAST` to integer |
+| `FLOAT` | `TEXT` | ASCII rendering of the float |
+| `TEXT` | `INTEGER` | `CAST` to integer |
+| `TEXT` | `FLOAT` | `CAST` to real |
+| `TEXT` | `BLOB` | No change |
+| `BLOB` | `INTEGER` | `CAST` to integer |
+| `BLOB` | `FLOAT` | `CAST` to real |
+| `BLOB` | `TEXT` | `CAST` to text, ensure zero terminator |
+
+## Working with `sqlite3_value` Objects
+
+The `sqlite3_value_*` API mirrors the column accessor functions but operates on standalone `sqlite3_value` objects — the form used inside application-defined SQL functions. Only **protected** `sqlite3_value` objects (those received as `argv[]` arguments in an SQL function, or created with `sqlite3_value_dup()`) are safe to use with these functions.
+
+<CodeGroup>
+```c Extraction functions
+const void          *sqlite3_value_blob(sqlite3_value*);
+double               sqlite3_value_double(sqlite3_value*);
+int                  sqlite3_value_int(sqlite3_value*);
+sqlite3_int64        sqlite3_value_int64(sqlite3_value*);
+const unsigned char *sqlite3_value_text(sqlite3_value*);
+const void          *sqlite3_value_text16(sqlite3_value*);
+int                  sqlite3_value_bytes(sqlite3_value*);
+int                  sqlite3_value_bytes16(sqlite3_value*);
+int                  sqlite3_value_type(sqlite3_value*);
+int                  sqlite3_value_numeric_type(sqlite3_value*);
+```
+
+```c Lifecycle functions
+sqlite3_value *sqlite3_value_dup(const sqlite3_value*);
+void           sqlite3_value_free(sqlite3_value*);
+```
+</CodeGroup>
+
+`sqlite3_value_dup()` creates a deep copy as a **protected** value; `sqlite3_value_free()` releases it. Both operate on any `sqlite3_value` regardless of protection status. Passing `NULL` to `sqlite3_value_free()` is a safe no-op.
+
+`sqlite3_value_numeric_type()` attempts to coerce a text value that looks like a number into an integer or float before returning the type code, which is handy for flexible user input.
+
+## Column Metadata (SQLITE_ENABLE_COLUMN_METADATA)
+
+When SQLite is compiled with `-DSQLITE_ENABLE_COLUMN_METADATA`, the following functions are available:
+
+```c
+const char *sqlite3_column_database_name(sqlite3_stmt*, int);
+const char *sqlite3_column_table_name(sqlite3_stmt*, int);
+const char *sqlite3_column_origin_name(sqlite3_stmt*, int);
+const char *sqlite3_column_decltype(sqlite3_stmt*, int);
+```
+
+<Expandable title="Function details">
+  - **`sqlite3_column_database_name`** — The name of the attached database the column originates from (e.g. `"main"`, `"temp"`, or an attached name).
+  - **`sqlite3_column_table_name`** — The un-aliased source table name.
+  - **`sqlite3_column_origin_name`** — The un-aliased source column name.
+  - **`sqlite3_column_decltype`** — The declared type string from the `CREATE TABLE` statement (e.g. `"VARCHAR(64)"`). Always UTF-8.
+
+  All four return `NULL` when the column is an expression or subquery rather than a direct table column, and also on memory-allocation failure. Calling multiple column-metadata functions concurrently on the same statement from different threads produces undefined results.
+</Expandable>
+
+<Tip>
+  `sqlite3_column_decltype()` reflects the type affinity declared in the schema, not the runtime type of the stored value. SQLite's dynamic typing means the two can differ.
+</Tip>
+
+## Complete SELECT Loop Example
+
+```c
+#include <stdio.h>
+#include "sqlite3.h"
+
+void query_example(sqlite3 *db) {
+    sqlite3_stmt *stmt;
+    const char *sql = "SELECT id, name, score FROM players ORDER BY score DESC";
+
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        fprintf(stderr, "prepare: %s\n", sqlite3_errmsg(db));
+        return;
+    }
+
+    int col_count = sqlite3_column_count(stmt);
+    /* Print column headers */
+    for (int i = 0; i < col_count; i++) {
+        printf("%-15s", sqlite3_column_name(stmt, i));
+    }
+    printf("\n");
+
+    /* Iterate rows */
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        /* Column 0: INTEGER */
+        printf("%-15lld", sqlite3_column_int64(stmt, 0));
+
+        /* Column 1: TEXT — capture bytes AFTER text pointer */
+        const unsigned char *name = sqlite3_column_text(stmt, 1);
+        int name_len = sqlite3_column_bytes(stmt, 1);
+        printf("%-15.*s", name_len, name ? (char *)name : "(null)");
+
+        /* Column 2: check actual type before reading */
+        int col_type = sqlite3_column_type(stmt, 2);
+        if (col_type == SQLITE_NULL) {
+            printf("%-15s", "NULL");
+        } else {
+            printf("%-15.2f", sqlite3_column_double(stmt, 2));
+        }
+        printf("\n");
+    }
+
+    sqlite3_finalize(stmt);
+}
+```
+
+<Note>
+  Pointers returned by `sqlite3_column_text()`, `sqlite3_column_blob()`, and `sqlite3_column_text16()` are invalidated by a subsequent call to `sqlite3_step()`, `sqlite3_reset()`, or `sqlite3_finalize()`. Do not cache them across iterations — copy the data if you need it to outlive the current row.
+</Note>

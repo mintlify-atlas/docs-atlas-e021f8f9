@@ -1,0 +1,276 @@
+---
+title: "Running SQL with sqlite3_exec"
+sidebarTitle: "sqlite3_exec"
+description: "Execute one or more SQL statements with sqlite3_exec, handle results via callback, free error messages, and understand when to prefer prepared statements instead."
+---
+
+`sqlite3_exec()` is a convenience wrapper that compiles, runs, and finalizes one or more semicolon-separated SQL statements in a single call. It is the fastest way to execute fire-and-forget DDL or DML — creating tables, inserting seed data, running migrations — where you do not need to bind parameters or read typed column values. For any query that runs more than once, accepts user-supplied parameters, or needs to read column data with its native type, you should use prepared statements instead.
+
+## Function Signature
+
+```c
+int sqlite3_exec(
+  sqlite3 *db,                                  /* An open database */
+  const char *sql,                              /* SQL to be evaluated */
+  int (*callback)(void*, int, char**, char**),  /* Callback function */
+  void *pArg,                                   /* 1st argument to callback */
+  char **errmsg                                 /* Error msg written here */
+);
+```
+
+<ParamField path="db" type="sqlite3 *" required>
+  An open database connection obtained from `sqlite3_open()` or `sqlite3_open_v2()`. Must remain open and unmodified for the duration of the call.
+</ParamField>
+
+<ParamField path="sql" type="const char *" required>
+  One or more UTF-8 encoded SQL statements separated by semicolons. If NULL, empty, or containing only whitespace and comments, no statements are evaluated and the database is not changed.
+</ParamField>
+
+<ParamField path="callback" type="int (*)(void*, int, char**, char**)" >
+  Optional callback invoked once per result row. Pass `NULL` to discard all results. The callback signature is:
+  ```c
+  int callback(void *pArg, int ncols, char **values, char **colnames);
+  ```
+  If the callback returns non-zero, `sqlite3_exec()` stops processing and returns `SQLITE_ABORT`.
+</ParamField>
+
+<ParamField path="pArg" type="void *">
+  User-supplied context pointer passed as the first argument to each callback invocation. May be `NULL`.
+</ParamField>
+
+<ParamField path="errmsg" type="char **">
+  If not `NULL` and an error occurs, a pointer to a newly allocated error message string is written here. The caller **must** free this string with `sqlite3_free()`. On success, `*errmsg` is set to `NULL`.
+</ParamField>
+
+## The Callback Function
+
+When a callback is provided, it is called once for each row returned by any SELECT statement in the SQL string. All column values are delivered as null-terminated UTF-8 strings regardless of their underlying storage type — integers, floats, and blobs are all converted to text.
+
+```c
+int my_callback(void *pArg, int ncols, char **values, char **colnames) {
+    /* ncols    — number of columns in this row */
+    /* values   — array of ncols string pointers (NULL if column is SQL NULL) */
+    /* colnames — array of ncols column-name strings */
+
+    for (int i = 0; i < ncols; i++) {
+        printf("  %s = %s\n",
+               colnames[i],
+               values[i] ? values[i] : "(NULL)");
+    }
+    printf("---\n");
+
+    return 0;  /* return non-zero to abort */
+}
+```
+
+<Warning>
+  The `values` and `colnames` arrays are only valid for the duration of a single callback invocation. Do **not** dereference these pointers after the callback returns.
+</Warning>
+
+## Freeing the Error Message
+
+When `sqlite3_exec()` returns an error and `errmsg` is not `NULL`, the pointed-to string must be freed with `sqlite3_free()`, not with the standard `free()`:
+
+```c
+char *err = NULL;
+int rc = sqlite3_exec(db, sql, NULL, NULL, &err);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "SQL error: %s\n", err);
+    sqlite3_free(err);   /* always free with sqlite3_free, not free() */
+    err = NULL;
+}
+```
+
+---
+
+## When to Use sqlite3_exec vs. Prepared Statements
+
+| Scenario | Recommended approach |
+|----------|----------------------|
+| One-off DDL (`CREATE TABLE`, `CREATE INDEX`) | `sqlite3_exec` |
+| Schema migrations | `sqlite3_exec` |
+| Inserting static seed data | `sqlite3_exec` |
+| Queries run repeatedly in a loop | Prepared statements |
+| Queries with user-supplied values | Prepared statements (never build SQL by concatenation) |
+| Queries that read typed column data (int, float, blob) | Prepared statements |
+| Bulk inserts where performance matters | Prepared statements inside a transaction |
+
+<Warning>
+  Never construct SQL strings by concatenating user-supplied data. Even with `sqlite3_exec`, always use prepared statements with `sqlite3_bind_*()` when incorporating external input.
+</Warning>
+
+---
+
+## Examples
+
+### CREATE TABLE
+
+```c
+#include <sqlite3.h>
+#include <stdio.h>
+
+int main(void) {
+    sqlite3 *db;
+    char *errmsg = NULL;
+    int rc;
+
+    rc = sqlite3_open("app.db", &db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Cannot open: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return 1;
+    }
+
+    const char *ddl =
+        "CREATE TABLE IF NOT EXISTS users ("
+        "  id    INTEGER PRIMARY KEY,"
+        "  name  TEXT    NOT NULL,"
+        "  email TEXT    NOT NULL UNIQUE"
+        ");";
+
+    rc = sqlite3_exec(db, ddl, NULL, NULL, &errmsg);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "DDL error: %s\n", errmsg);
+        sqlite3_free(errmsg);
+        sqlite3_close(db);
+        return 1;
+    }
+
+    printf("Table created.\n");
+    sqlite3_close(db);
+    return 0;
+}
+```
+
+### INSERT Multiple Rows
+
+```c
+const char *inserts =
+    "INSERT INTO users(name, email) VALUES ('Alice', 'alice@example.com');"
+    "INSERT INTO users(name, email) VALUES ('Bob',   'bob@example.com');";
+
+char *errmsg = NULL;
+int rc = sqlite3_exec(db, inserts, NULL, NULL, &errmsg);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Insert error: %s\n", errmsg);
+    sqlite3_free(errmsg);
+}
+```
+
+### SELECT with Callback
+
+```c
+typedef struct {
+    int count;
+} QueryCtx;
+
+int row_callback(void *pArg, int ncols, char **vals, char **cols) {
+    QueryCtx *ctx = (QueryCtx *)pArg;
+    ctx->count++;
+
+    printf("Row %d:\n", ctx->count);
+    for (int i = 0; i < ncols; i++) {
+        printf("  %-10s = %s\n", cols[i], vals[i] ? vals[i] : "NULL");
+    }
+    return 0;  /* continue */
+}
+
+QueryCtx ctx = { .count = 0 };
+char *errmsg = NULL;
+
+int rc = sqlite3_exec(
+    db,
+    "SELECT id, name, email FROM users ORDER BY id;",
+    row_callback,
+    &ctx,
+    &errmsg
+);
+
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Query error: %s\n", errmsg);
+    sqlite3_free(errmsg);
+} else {
+    printf("Total rows: %d\n", ctx.count);
+}
+```
+
+### Multiple Statements in One Call
+
+```c
+const char *batch =
+    "BEGIN;"
+    "DELETE FROM users WHERE email LIKE '%@spam.com';"
+    "UPDATE users SET name = UPPER(name) WHERE id = 1;"
+    "COMMIT;";
+
+char *errmsg = NULL;
+int rc = sqlite3_exec(db, batch, NULL, NULL, &errmsg);
+if (rc != SQLITE_OK) {
+    fprintf(stderr, "Batch error: %s\n", errmsg);
+    sqlite3_free(errmsg);
+    /* Transaction was automatically rolled back on error */
+}
+```
+
+---
+
+## Limitations
+
+- **All values are TEXT.** The callback receives every column value as a string, even integers and BLOBs. If you need to process typed data — or handle large BLOBs efficiently — use `sqlite3_column_int()`, `sqlite3_column_double()`, `sqlite3_column_blob()`, etc. with prepared statements.
+- **Cannot stop cleanly mid-result.** Returning non-zero from the callback causes `sqlite3_exec()` to return `SQLITE_ABORT`, but any statements already executed are not rolled back (unless inside an explicit transaction).
+- **No parameter binding.** `sqlite3_exec()` provides no mechanism for binding parameters. Never build SQL strings with user data via `sprintf` or string concatenation.
+- **SQL text must not be modified during execution.** The application must not alter the `sql` string for the duration of the call.
+
+---
+
+## Complete Working Example with Error Handling
+
+```c
+#include <sqlite3.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+static int print_row(void *unused, int ncols, char **vals, char **cols) {
+    (void)unused;
+    for (int i = 0; i < ncols; i++) {
+        if (i > 0) printf(", ");
+        printf("%s=%s", cols[i], vals[i] ? vals[i] : "NULL");
+    }
+    printf("\n");
+    return 0;
+}
+
+static int exec_or_die(sqlite3 *db, const char *sql) {
+    char *err = NULL;
+    int rc = sqlite3_exec(db, sql, print_row, NULL, &err);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "Error executing SQL:\n  %s\nError: %s\n", sql, err);
+        sqlite3_free(err);
+    }
+    return rc;
+}
+
+int main(void) {
+    sqlite3 *db;
+
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) {
+        fprintf(stderr, "Open failed: %s\n", sqlite3_errmsg(db));
+        sqlite3_close(db);
+        return 1;
+    }
+
+    exec_or_die(db,
+        "CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT, price REAL);"
+        "INSERT INTO products VALUES (1, 'Widget', 9.99);"
+        "INSERT INTO products VALUES (2, 'Gadget', 24.99);"
+        "INSERT INTO products VALUES (3, 'Doohickey', 4.49);");
+
+    printf("Products:\n");
+    exec_or_die(db, "SELECT id, name, price FROM products ORDER BY price;");
+
+    printf("\nChanged: %d rows\n", sqlite3_changes(db));
+
+    sqlite3_close(db);
+    return 0;
+}
+```

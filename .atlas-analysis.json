@@ -1,24 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "SQLite",
+  "projectType": "data-platform",
+  "projectName": "SQLite",
+  "projectDescription": "SQLite is a self-contained, serverless, zero-configuration, transactional SQL database engine implemented as a C library, widely used as the most deployed database engine in the world.",
   "theme": "maple",
-  "colors": {
-    "primary": "#6f948b",
-    "light": "#334740",
-    "dark": "#6f948b"
-  },
-  "favicon": "https://media.brand.dev/7a2dc05e-cb63-4ba1-9d28-1a6389e9c5b5.png",
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/sqlite/sqlite"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/sqlite/sqlite"
-    }
-  },
+  "primaryColor": "#6f948b",
+  "lightColor": "#334740",
+  "darkColor": null,
   "navigation": {
     "tabs": [
       {
@@ -111,5 +98,38 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Serverless, zero-configuration, self-contained SQL database engine",
+    "Single-file database format with full ACID transaction support",
+    "Amalgamation build — entire library in one sqlite3.c file",
+    "Rich C API with prepared statements, custom functions, and VFS abstraction",
+    "Full-text search (FTS5), R-Tree spatial indexing, and JSON support",
+    "Cross-platform: Unix, Windows, WASM, Android, iOS, and more",
+    "WAL (Write-Ahead Logging) mode for concurrent reads and writes",
+    "Loadable extensions and virtual tables",
+    "In-memory databases for testing and caching",
+    "Online backup API for hot database copies"
+  ],
+  "publicApiSurface": [
+    "sqlite3_open() / sqlite3_open_v2() / sqlite3_close()",
+    "sqlite3_exec()",
+    "sqlite3_prepare_v2() / sqlite3_step() / sqlite3_finalize()",
+    "sqlite3_bind_*() — bind values to prepared statements",
+    "sqlite3_column_*() — read result columns",
+    "sqlite3_errmsg() / sqlite3_errcode() / sqlite3_errstr()",
+    "sqlite3_config() / sqlite3_db_config()",
+    "sqlite3_create_function_v2() — custom SQL functions",
+    "sqlite3_blob_open() / sqlite3_blob_read() / sqlite3_blob_write()",
+    "sqlite3_backup_init() / sqlite3_backup_step() / sqlite3_backup_finish()",
+    "sqlite3_vfs — pluggable virtual filesystem interface",
+    "sqlite3_last_insert_rowid() / sqlite3_changes() / sqlite3_total_changes()",
+    "sqlite3_interrupt() / sqlite3_busy_handler() / sqlite3_busy_timeout()",
+    "sqlite3_limit() — runtime limit controls",
+    "sqlite3_libversion() / sqlite3_sourceid()",
+    "FTS5 virtual table extension",
+    "R-Tree virtual table extension (rtree)",
+    "Session extension for change tracking",
+    "SQLite CLI dot-commands (.open, .tables, .schema, .import, .dump, .mode, etc.)"
+  ]
 }

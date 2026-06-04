@@ -1,0 +1,164 @@
+---
+title: "SQLite Compile-Time Configuration Options"
+sidebarTitle: "Compile Options"
+description: "Reference for the most important SQLite compile-time options, covering threading, feature flags, omissions, size limits, and memory configuration."
+---
+
+SQLite's behaviour can be tuned at compile time by defining C preprocessor macros when building `sqlite3.c` or the individual source files. These options let you enable optional extensions, strip out features you do not need, tighten resource limits, or change threading semantics — all without touching SQLite's source. They are passed to the compiler with the `-D` flag (GCC/Clang) or `/D` flag (MSVC), and can also be supplied through the `OPTIONS=` argument to `make` or `nmake` when using the SQLite build system.
+
+## How to Pass Compile-Time Options
+
+<Tabs>
+  <Tab title="Compiler flag (-D)">
+    Pass the macro directly on the compiler command line when you compile `sqlite3.c`:
+
+    ```bash
+    # GCC / Clang
+    gcc -O2 -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_FTS5 \
+        -o myapp main.c sqlite3.c -lpthread -ldl
+    ```
+
+    ```bat
+    REM MSVC
+    cl /O2 /DSQLITE_THREADSAFE=0 /DSQLITE_ENABLE_FTS5 main.c sqlite3.c
+    ```
+  </Tab>
+  <Tab title="make OPTIONS= (Unix)">
+    When building with the SQLite `Makefile`, append `OPTIONS=...` on the `make` command line:
+
+    ```bash
+    ./configure --enable-all
+    make OPTIONS="-DSQLITE_OMIT_DEPRECATED -DSQLITE_ENABLE_FTS5" sqlite3
+    ```
+
+    Options are added on top of whatever `./configure` already selected.
+  </Tab>
+  <Tab title="nmake OPTIONS= (Windows)">
+    The same `OPTIONS=` mechanism works with `nmake` and `Makefile.msc`:
+
+    ```bat
+    nmake /f Makefile.msc OPTIONS="-DSQLITE_OMIT_DEPRECATED" sqlite3.exe
+    ```
+
+    Or using the convenience wrapper:
+
+    ```bat
+    make OPTIONS=-DSQLITE_OMIT_DEPRECATED sqlite3.exe
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Threading: SQLITE_THREADSAFE
+
+The `SQLITE_THREADSAFE` macro controls whether SQLite compiles in mutex code and, if so, which threading mode is the default. Setting it to `0` removes all mutex overhead for single-threaded applications.
+
+| Value | Mode | Description |
+|-------|------|-------------|
+| `1` | Serialized (default) | SQLite serializes concurrent access internally. Safe to use from multiple threads with the same or different database connections. |
+| `2` | Multi-thread | Mutexes protect database connections but not individual prepared statements. Safe provided no single connection is used from multiple threads simultaneously. |
+| `0` | Single-thread | All mutex code is omitted. Fastest option. Only safe when SQLite is used by a single thread. |
+
+```bash
+# Compile without any mutex code (fastest, single-threaded only)
+gcc -DSQLITE_THREADSAFE=0 -O2 -o myapp main.c sqlite3.c
+```
+
+<Note>
+Even when compiled with `SQLITE_THREADSAFE=1` or `=2`, the threading mode can be changed at runtime using `sqlite3_config()` with `SQLITE_CONFIG_SINGLETHREAD`, `SQLITE_CONFIG_MULTITHREAD`, or `SQLITE_CONFIG_SERIALIZED`. The compile-time value sets the default; `sqlite3_threadsafe()` always returns the compile-time setting.
+</Note>
+
+---
+
+## Feature Enables: SQLITE_ENABLE_*
+
+These macros activate optional subsystems that are compiled out by default to keep the library small. Define the macro (no value required) to enable the feature.
+
+| Option | Default | Description |
+|--------|:-------:|-------------|
+| `SQLITE_ENABLE_FTS5` | Off | Enables the **FTS5** full-text search engine. FTS5 is the current generation full-text search extension, replacing the older FTS3/FTS4. Source lives in `ext/fts5/`. |
+| `SQLITE_ENABLE_RTREE` | Off | Enables the **R*Tree** virtual table for spatial indexing. Required for geographic and bounding-box queries. Source lives in `ext/rtree/`. |
+| `SQLITE_ENABLE_JSON1` | Off | Enables the **JSON1** extension, providing `json()`, `json_object()`, `json_extract()`, and related SQL functions for working with JSON data. |
+| `SQLITE_ENABLE_COLUMN_METADATA` | Off | Enables the `sqlite3_column_database_name()`, `sqlite3_column_table_name()`, and `sqlite3_column_origin_name()` APIs, which return the source database, table, and column for each result-set column. |
+| `SQLITE_ENABLE_STAT4` | Off | Enables collection of histogram data on index columns during `ANALYZE`. Improves query planner accuracy for skewed data distributions at the cost of more space in the `sqlite_stat4` table. |
+| `SQLITE_ENABLE_NORMALIZE` | Off | Enables the `sqlite3_normalized_sql()` API, which returns a canonical form of a prepared statement's SQL text with literal values replaced by `?` parameters. |
+| `SQLITE_ENABLE_MEMSYS5` | Off | Activates the **memsys5** memory allocator, a power-of-two, no-fail allocator suitable for embedded systems with no heap. Enables `SQLITE_CONFIG_HEAP` to supply a static memory buffer. |
+
+<Tip>
+The `--enable-all` flag to `./configure` (Unix) enables all of the above options as well as several others. It is the recommended setting for release builds and is equivalent to passing them all via `-D` flags.
+</Tip>
+
+---
+
+## Feature Omissions: SQLITE_OMIT_*
+
+`SQLITE_OMIT_*` macros remove features that are present by default. They reduce binary size at the cost of functionality.
+
+| Option | Default | Description |
+|--------|:-------:|-------------|
+| `SQLITE_OMIT_DEPRECATED` | Off (deprecated APIs present) | Removes deprecated API functions and constants from the build. Using deprecated identifiers will cause a compile error. Useful for ensuring code does not rely on obsolete interfaces. |
+| `SQLITE_OMIT_LOAD_EXTENSION` | Off (load_extension enabled) | Removes run-time loadable extension support (`sqlite3_load_extension()` and the `load_extension()` SQL function). Reduces attack surface in security-sensitive deployments. Automatically set when `SQLITE_OMIT_FLOATING_POINT` is defined. |
+| `SQLITE_OMIT_AUTOINIT` | Off (auto-init enabled) | Removes the automatic call to `sqlite3_initialize()` that normally happens the first time any SQLite API is used. When this macro is defined, the application must call `sqlite3_initialize()` explicitly before using any other SQLite interface. |
+
+```bash
+# Example: strip deprecated APIs and disable loadable extensions
+gcc -O2 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_LOAD_EXTENSION \
+    -o myapp main.c sqlite3.c -lpthread -ldl
+```
+
+<Warning>
+Combining `SQLITE_OMIT_LOAD_EXTENSION` with third-party libraries or ORMs that call `sqlite3_load_extension()` at startup will cause runtime errors. Verify that none of your dependencies rely on this feature before omitting it.
+</Warning>
+
+---
+
+## Limits: SQLITE_MAX_*
+
+These macros cap various internal limits. Lowering them reduces memory consumption in constrained environments; they cannot be raised above the hard limits baked into the SQLite source.
+
+| Option | Default | Description |
+|--------|--------:|-------------|
+| `SQLITE_MAX_LENGTH` | `1000000000` (1 GB) | Maximum number of bytes in a string or BLOB value. |
+| `SQLITE_MAX_COLUMN` | `2000` | Maximum number of columns in a table or result set. Hard upper limit is 32767. |
+| `SQLITE_MAX_SQL_LENGTH` | `1000000000` (1 GB) | Maximum length of an SQL statement string in bytes. |
+| `SQLITE_MAX_ATTACHED` | `10` | Maximum number of databases that can be attached with the `ATTACH` statement. |
+
+```bash
+# Tighten limits for an embedded device with constrained RAM
+gcc -O2 \
+    -DSQLITE_MAX_LENGTH=1048576 \
+    -DSQLITE_MAX_COLUMN=100 \
+    -DSQLITE_MAX_SQL_LENGTH=65536 \
+    -DSQLITE_MAX_ATTACHED=4 \
+    -o myapp main.c sqlite3.c
+```
+
+<Note>
+`SQLITE_MAX_COLUMN` may not exceed **32767**. Attempting to compile with a higher value produces a preprocessor error. All other `SQLITE_MAX_*` values above are treated as soft defaults and can be overridden at runtime via `sqlite3_limit()`.
+</Note>
+
+---
+
+## Memory: SQLITE_DEFAULT_MEMSTATUS and SQLITE_DEFAULT_LOOKASIDE
+
+These two macros tune SQLite's memory accounting and per-connection lookaside allocator, which are the biggest levers for reducing memory overhead in embedded deployments.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `SQLITE_DEFAULT_MEMSTATUS` | `1` (enabled) | When `1`, SQLite tracks total memory allocated and highwater marks, enabling `sqlite3_memory_used()`, `sqlite3_memory_highwater()`, `sqlite3_soft_heap_limit64()`, and related APIs. Set to `0` to disable tracking and remove the bookkeeping overhead. |
+| `SQLITE_DEFAULT_LOOKASIDE` | `1200,40` | Sets the default lookaside allocator slot size (`sz`) and slot count (`cnt`) for each database connection. The default (`1200,40`) allocates approximately 48 KB per connection for lookaside. Using `1200,100` allocates ~120 KB but is only appropriate when the two-size lookaside (`SQLITE_OMIT_TWOSIZE_LOOKASIDE`) is disabled. |
+
+```bash
+# Disable memory statistics tracking (saves a small amount of per-call overhead)
+gcc -O2 -DSQLITE_DEFAULT_MEMSTATUS=0 -o myapp main.c sqlite3.c -lpthread -ldl
+```
+
+```bash
+# Increase lookaside for workloads that open many connections with complex queries
+gcc -O2 "-DSQLITE_DEFAULT_LOOKASIDE=1200,100" -o myapp main.c sqlite3.c -lpthread -ldl
+```
+
+<Tip>
+The lookaside configuration can also be changed at runtime for the process default using `sqlite3_config(SQLITE_CONFIG_LOOKASIDE, sz, cnt)`, or per connection using `sqlite3_db_config(db, SQLITE_DBCONFIG_LOOKASIDE, ...)`. The compile-time macro sets the out-of-the-box default only.
+</Tip>

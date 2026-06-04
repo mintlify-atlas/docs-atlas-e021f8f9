@@ -1,0 +1,244 @@
+---
+title: "SQLite C API: Architecture and Core Objects"
+sidebarTitle: "Introduction"
+description: "Overview of the SQLite C API architecture, core objects, threading modes, version constants, and object lifecycle for building database-driven applications."
+---
+
+The SQLite C API is the primary interface through which applications interact with an SQLite database. Defined in `sqlite3.h` — a file generated from the source template `src/sqlite.h.in` during the build process — it exposes a rich set of functions, types, and constants that together cover everything from opening a connection to defining custom SQL functions. Because the entire API surface lives in a single header and a single amalgamation source file (`sqlite3.c`), integrating SQLite into any C or C++ project is straightforward.
+
+## The Public Header
+
+The installed header is always named `sqlite3.h`. The build system substitutes version strings and other compile-time values into the template `src/sqlite.h.in` to produce the final header. Any symbol that does not appear in `sqlite3.h` is considered a private implementation detail and may change without notice.
+
+```c
+#include <sqlite3.h>
+```
+
+Link your application against the shared or static library, or compile the amalgamation directly into your project:
+
+```bash
+# Link against the system library
+gcc myapp.c -lsqlite3 -o myapp
+
+# Compile the single-file amalgamation directly
+gcc myapp.c sqlite3.c -o myapp
+```
+
+<Tip>
+  Compiling the amalgamation directly (`sqlite3.c`) rather than linking against a shared library gives the compiler full visibility into SQLite internals, often yielding a 5–10 % performance improvement through inlining and other optimisations.
+</Tip>
+
+## Core Objects
+
+The entire C API revolves around three opaque types. All are declared as forward-referenced `struct` typedefs; you never manipulate their internals directly.
+
+<CardGroup cols={3}>
+  <Card title="sqlite3" icon="database">
+    **Database connection.** Represents one open connection to an on-disk or in-memory database. Created by `sqlite3_open()` / `sqlite3_open_v2()` and destroyed by `sqlite3_close()`.
+  </Card>
+  <Card title="sqlite3_stmt" icon="code">
+    **Prepared statement.** A single SQL statement compiled into bytecode and ready for execution. Created by `sqlite3_prepare_v2()` and destroyed by `sqlite3_finalize()`.
+  </Card>
+  <Card title="sqlite3_value" icon="brackets-curly">
+    **Dynamic value.** Holds a single SQL value (integer, real, text, BLOB, or NULL) with dynamic typing. Used extensively in custom SQL functions and column result retrieval.
+  </Card>
+</CardGroup>
+
+```c
+typedef struct sqlite3       sqlite3;
+typedef struct sqlite3_stmt  sqlite3_stmt;
+typedef struct sqlite3_value sqlite3_value;
+```
+
+### sqlite3 — Database Connection
+
+Each open SQLite database is represented by an `sqlite3 *` pointer. Think of it as an object: `sqlite3_open()`, `sqlite3_open16()`, and `sqlite3_open_v2()` are its constructors; `sqlite3_close()` and `sqlite3_close_v2()` are its destructors. Many other interfaces — `sqlite3_prepare_v2()`, `sqlite3_create_function()`, `sqlite3_busy_timeout()`, and hundreds more — are effectively methods on this object.
+
+### sqlite3_stmt — Prepared Statement
+
+An `sqlite3_stmt *` represents a single SQL statement compiled into binary form. The header describes this aptly: *"Think of each SQL statement as a separate computer program. The original SQL text is source code. A prepared statement object is the compiled object code."*
+
+### sqlite3_value — Dynamic Value
+
+`sqlite3_value` stores any value that can appear in a database table. SQLite uses dynamic typing, so a single `sqlite3_value` may hold an integer, a floating-point number, a text string, a BLOB, or NULL. Values may be *protected* (an internal mutex is held) or *unprotected* (no mutex), which matters in multi-threaded programs.
+
+---
+
+## Object Lifecycle
+
+The typical flow for executing a SQL statement follows a strict sequence of stages:
+
+```c
+sqlite3      *db   = NULL;
+sqlite3_stmt *stmt = NULL;
+int           rc;
+
+/* 1. Open the database connection */
+rc = sqlite3_open("mydb.sqlite3", &db);
+if (rc != SQLITE_OK) { /* handle error */ }
+
+/* 2. Compile the SQL into a prepared statement */
+rc = sqlite3_prepare_v2(db, "SELECT id, name FROM users WHERE id = ?", -1, &stmt, NULL);
+if (rc != SQLITE_OK) { /* handle error */ }
+
+/* 3. Bind parameter values (1-based index) */
+rc = sqlite3_bind_int(stmt, 1, 42);
+
+/* 4. Step through results */
+while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    int         id   = sqlite3_column_int(stmt, 0);
+    const char *name = (const char *)sqlite3_column_text(stmt, 1);
+    /* use id and name */
+}
+
+/* 5a. Reset to re-execute with new bindings */
+sqlite3_reset(stmt);
+
+/* 5b. Or finalize to destroy the statement */
+sqlite3_finalize(stmt);
+
+/* 6. Close the database connection */
+sqlite3_close(db);
+```
+
+<Accordion title="Lifecycle stages explained">
+  | Stage | Function(s) | Notes |
+  |-------|------------|-------|
+  | **Open** | `sqlite3_open()`, `sqlite3_open_v2()` | Creates the `sqlite3` object and opens (or creates) the database file. |
+  | **Prepare** | `sqlite3_prepare_v2()`, `sqlite3_prepare_v3()` | Compiles SQL text into an `sqlite3_stmt` bytecode object. |
+  | **Bind** | `sqlite3_bind_int()`, `sqlite3_bind_text()`, `sqlite3_bind_blob()`, … | Substitutes values for `?` parameters before (or between) executions. |
+  | **Step** | `sqlite3_step()` | Advances execution. Returns `SQLITE_ROW` for each result row, `SQLITE_DONE` when finished. |
+  | **Reset** | `sqlite3_reset()` | Rewinds a statement so it can be re-executed from the start with new bindings. |
+  | **Finalize** | `sqlite3_finalize()` | Destroys the prepared statement and frees its resources. |
+  | **Close** | `sqlite3_close()`, `sqlite3_close_v2()` | Destroys the database connection. All statements must be finalized first when using `sqlite3_close()`. |
+</Accordion>
+
+---
+
+## Auto-Initialization
+
+SQLite requires internal state to be initialised before it can be used. The `sqlite3_initialize()` function performs this initialisation; its counterpart `sqlite3_shutdown()` releases globally allocated resources.
+
+```c
+int sqlite3_initialize(void);
+int sqlite3_shutdown(void);
+```
+
+In practice, most applications never call these directly. `sqlite3_open()` calls `sqlite3_initialize()` internally, so the library is automatically initialised on first use.
+
+<Note>
+  If SQLite is compiled with the `SQLITE_OMIT_AUTOINIT` compile-time option, automatic initialisation is disabled and applications **must** call `sqlite3_initialize()` explicitly before invoking any other SQLite interface.
+</Note>
+
+---
+
+## Thread Safety Modes
+
+SQLite supports three threading modes, controlled at compile time via the `SQLITE_THREADSAFE` preprocessor macro and optionally adjusted at runtime via `sqlite3_config()`.
+
+<Tabs>
+  <Tab title="Single-thread (0)">
+    Compiled with `SQLITE_THREADSAFE=0`. All mutexes are omitted entirely. SQLite is **not** safe to use from more than one thread simultaneously. This mode maximises performance when concurrency is not needed.
+
+    ```c
+    /* Check at runtime whether mutexes are compiled in */
+    if (sqlite3_threadsafe() == 0) {
+        /* Single-thread mode */
+    }
+    ```
+  </Tab>
+  <Tab title="Serialized (1) — default">
+    Compiled with `SQLITE_THREADSAFE=1` (the default). SQLite serialises all access to database connections and prepared statements using recursive mutexes. The library itself ensures safety; the application may freely share connections across threads.
+
+    ```c
+    /* Explicitly request serialized mode at runtime */
+    sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+    ```
+  </Tab>
+  <Tab title="Multi-thread (2)">
+    Compiled with `SQLITE_THREADSAFE=2`. Mutexes protect internal global state but **not** individual database connections or prepared statements. The application is responsible for ensuring that no two threads use the same connection or statement concurrently.
+
+    ```c
+    /* Switch to multi-thread mode */
+    sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  `sqlite3_threadsafe()` reports only the **compile-time** setting. Runtime changes made via `sqlite3_config()` are not reflected in its return value.
+</Warning>
+
+---
+
+## Version Constants and Functions
+
+The public header defines compile-time macros and corresponding runtime functions for identifying the exact version of SQLite in use. The version string format is `"X.Y.Z"` and the version number encodes this as `X*1000000 + Y*1000 + Z`.
+
+```c
+/* Compile-time macros — values substituted by the build system */
+#define SQLITE_VERSION        "X.Y.Z"
+#define SQLITE_VERSION_NUMBER (X*1000000 + Y*1000 + Z)
+#define SQLITE_SOURCE_ID      "..."   /* date + SHA hash of source tree */
+
+/* Runtime functions — report the linked library's version */
+SQLITE_EXTERN const char sqlite3_version[];
+const char *sqlite3_libversion(void);
+const char *sqlite3_sourceid(void);
+int         sqlite3_libversion_number(void);
+```
+
+It is good practice to assert that the header and library agree:
+
+```c
+assert(sqlite3_libversion_number() == SQLITE_VERSION_NUMBER);
+assert(strncmp(sqlite3_sourceid(), SQLITE_SOURCE_ID, 80) == 0);
+assert(strcmp(sqlite3_libversion(), SQLITE_VERSION) == 0);
+```
+
+<Note>
+  `sqlite3_libversion()` exists primarily for DLL consumers that cannot access string constants inside the DLL directly. In most cases `SQLITE_VERSION` and `sqlite3_libversion()` are interchangeable.
+</Note>
+
+---
+
+## Explore the Full API
+
+<CardGroup cols={2}>
+  <Card title="Opening and Closing" icon="door-open" href="/api/opening-closing">
+    `sqlite3_open()`, `sqlite3_open_v2()`, `sqlite3_close()` — creating and destroying database connections.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/api/configuration">
+    `sqlite3_config()`, `sqlite3_db_config()` — global and per-connection tuning options.
+  </Card>
+  <Card title="Status and Limits" icon="gauge" href="/api/status-and-limits">
+    `sqlite3_status()`, `sqlite3_limit()` — runtime statistics and resource limits.
+  </Card>
+  <Card title="One-Step Execution" icon="bolt" href="/api/exec">
+    `sqlite3_exec()` — convenience wrapper for running SQL without explicit prepare/step/finalize.
+  </Card>
+  <Card title="Prepared Statements" icon="file-code" href="/api/prepared-statements">
+    `sqlite3_prepare_v2()`, `sqlite3_step()`, `sqlite3_finalize()` — the core query execution loop.
+  </Card>
+  <Card title="Binding Values" icon="link" href="/api/binding-values">
+    `sqlite3_bind_int()`, `sqlite3_bind_text()`, `sqlite3_bind_blob()` — substituting parameters before execution.
+  </Card>
+  <Card title="Reading Results" icon="table" href="/api/reading-results">
+    `sqlite3_column_int()`, `sqlite3_column_text()`, `sqlite3_column_type()` — extracting row data.
+  </Card>
+  <Card title="Custom Functions" icon="function" href="/api/custom-functions">
+    `sqlite3_create_function_v2()` — registering application-defined scalar and aggregate SQL functions.
+  </Card>
+  <Card title="BLOB I/O" icon="file-binary" href="/api/blob-io">
+    `sqlite3_blob_open()`, `sqlite3_blob_read()`, `sqlite3_blob_write()` — incremental BLOB access.
+  </Card>
+  <Card title="Online Backup" icon="floppy-disk" href="/api/backup">
+    `sqlite3_backup_init()`, `sqlite3_backup_step()`, `sqlite3_backup_finish()` — live database copying.
+  </Card>
+  <Card title="VFS" icon="hard-drive" href="/api/vfs">
+    `sqlite3_vfs_register()`, `sqlite3_vfs_find()` — pluggable virtual file systems.
+  </Card>
+  <Card title="Error Codes" icon="triangle-exclamation" href="/api/error-codes">
+    Primary and extended result codes, error-retrieval functions, and handling patterns.
+  </Card>
+</CardGroup>

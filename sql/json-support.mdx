@@ -1,0 +1,387 @@
+---
+title: "JSON Functions and the JSONB Format in SQLite"
+sidebarTitle: "JSON Support"
+description: "Reference for all SQLite JSON functions: json_extract, ->, ->>, json_each, json_set, JSONB binary format, and real-world query patterns for JSON data."
+---
+
+SQLite ships with a comprehensive set of JSON functions built directly into the engine — no extension loading required. These functions can parse, query, construct, and mutate JSON documents stored in TEXT or BLOB columns. Beginning with SQLite 3.45.0 (2024-01-01), SQLite also supports **JSONB**, a binary JSON encoding that is faster to process and slightly smaller than text JSON.
+
+## Core JSON Functions
+
+### json() — Validate and Canonicalise
+
+`json(X)` parses `X` as JSON and returns it in canonical minified text form. It is useful for normalising JSON before storage or comparison.
+
+```sql
+SELECT json('  {"b":2, "a":1}  ');   -- '{"b":2,"a":1}'
+SELECT json('[1,2,3]');               -- '[1,2,3]'
+SELECT json('invalid');               -- NULL (or error in strict mode)
+```
+
+### json_valid() — Validity Check
+
+```sql
+SELECT json_valid('{"a":1}');    -- 1
+SELECT json_valid('bad json');   -- 0
+SELECT json_valid(NULL);         -- 0
+
+-- Second argument (SQLite 3.45+): flags bitmask
+-- 1 = accept RFC 8259 JSON
+-- 4 = accept JSONB blobs
+SELECT json_valid(jsonb('{"a":1}'), 4);  -- 1
+```
+
+### json_type() — Element Type
+
+Returns the JSON type of the document or of the value at a given path.
+
+```sql
+SELECT json_type('{"a":[1,2]}');          -- 'object'
+SELECT json_type('{"a":[1,2]}', '$.a');   -- 'array'
+SELECT json_type('{"a":42}',    '$.a');   -- 'integer'
+SELECT json_type('{"a":3.14}',  '$.a');   -- 'real'
+SELECT json_type('{"a":"hi"}',  '$.a');   -- 'text'
+SELECT json_type('{"a":null}',  '$.a');   -- 'null'
+SELECT json_type('{"a":true}',  '$.a');   -- 'true'
+```
+
+---
+
+## Extracting Values
+
+### json_extract()
+
+`json_extract(json, path, ...)` returns the value(s) at one or more JSON paths. Multiple paths return a JSON array.
+
+```sql
+SELECT json_extract('{"name":"Alice","age":30}', '$.name');  -- 'Alice'
+SELECT json_extract('{"name":"Alice","age":30}', '$.age');   -- 30
+SELECT json_extract('[10,20,30]', '$[1]');                   -- 20
+
+-- Multiple paths → JSON array
+SELECT json_extract('{"a":1,"b":2}', '$.a', '$.b');          -- '[1,2]'
+```
+
+### The -> and ->> Operators
+
+These operators (added in SQLite 3.38.0) provide a concise infix syntax for JSON extraction, compatible with MySQL and PostgreSQL.
+
+| Operator | Returns | Equivalent to |
+|---|---|---|
+| `->` | JSON (text/blob) | `json_extract()` when result is object/array |
+| `->>` | SQL value (TEXT/INTEGER/REAL/NULL) | Primitive extraction |
+
+```sql
+SELECT '{"name":"Alice","scores":[1,2,3]}' -> '$.name';
+-- '"Alice"'  (JSON string, with quotes)
+
+SELECT '{"name":"Alice","scores":[1,2,3]}' ->> '$.name';
+-- 'Alice'    (SQL TEXT, no quotes)
+
+SELECT '{"count":42}' ->> '$.count';
+-- 42  (SQL INTEGER)
+
+SELECT '{"data":[1,2,3]}' -> '$.data';
+-- '[1,2,3]'  (JSON array as text)
+
+-- Chain operators on a table column
+SELECT data ->> '$.region' AS region
+FROM   events
+WHERE  data ->> '$.severity' = 'high';
+```
+
+<Note>
+The `->` operator always returns either JSON or NULL. The `->>` operator converts the extracted value to a native SQL type — integers become `INTEGER`, floating-point becomes `REAL`, strings become `TEXT`, and JSON null becomes SQL `NULL`.
+</Note>
+
+---
+
+## Building JSON
+
+### json_array()
+
+```sql
+SELECT json_array(1, 2, 'three', NULL);   -- '[1,2,"three",null]'
+SELECT json_array();                       -- '[]'
+```
+
+### json_object()
+
+```sql
+SELECT json_object('name', 'Alice', 'age', 30);
+-- '{"name":"Alice","age":30}'
+
+-- Labels must be TEXT
+SELECT json_object('x', 1, 'y', json_array(2, 3));
+-- '{"x":1,"y":[2,3]}'
+```
+
+### json_quote()
+
+Wraps a SQL value as a properly escaped JSON value.
+
+```sql
+SELECT json_quote('hello');    -- '"hello"'
+SELECT json_quote(42);         -- '42'
+SELECT json_quote(NULL);       -- 'null'
+SELECT json_quote(X'ff00');    -- '"\/\/AA=="'   (base64-encoded blob)
+```
+
+### json_array_length()
+
+```sql
+SELECT json_array_length('[1,2,3,4]');             -- 4
+SELECT json_array_length('{"a":[10,20]}', '$.a');  -- 2
+```
+
+---
+
+## Modifying JSON
+
+All modification functions return a new JSON document — they do not mutate in place.
+
+### json_insert(), json_replace(), json_set()
+
+| Function | Inserts new? | Updates existing? |
+|---|---|---|
+| `json_insert` | Yes | No |
+| `json_replace` | No | Yes |
+| `json_set` | Yes | Yes |
+
+```sql
+-- json_insert: adds $.z only if it doesn't exist
+SELECT json_insert('{"a":1}', '$.b', 2, '$.a', 99);
+-- '{"a":1,"b":2}'   ($.a not overwritten)
+
+-- json_replace: updates existing keys only
+SELECT json_replace('{"a":1}', '$.a', 99, '$.b', 2);
+-- '{"a":99}'        ($.b not added)
+
+-- json_set: insert or replace
+SELECT json_set('{"a":1}', '$.a', 99, '$.b', 2);
+-- '{"a":99,"b":2}'
+```
+
+### json_remove()
+
+```sql
+SELECT json_remove('{"a":1,"b":2,"c":3}', '$.b');
+-- '{"a":1,"c":3}'
+
+SELECT json_remove('[0,1,2,3]', '$[1]', '$[2]');
+-- '[0,3]'  (removes index 1, then index 2 from the result)
+```
+
+### json_patch()
+
+Applies an RFC 7396 JSON Merge Patch. Keys with `null` values in the patch remove keys from the target.
+
+```sql
+SELECT json_patch('{"a":1,"b":2}', '{"b":99,"c":3}');
+-- '{"a":1,"b":99,"c":3}'
+
+-- Null in patch removes the key
+SELECT json_patch('{"a":1,"b":2}', '{"b":null}');
+-- '{"a":1}'
+```
+
+---
+
+## Table-Valued Functions: json_each() and json_tree()
+
+These functions expand JSON into relational rows — invaluable for working with JSON arrays and nested objects.
+
+### json_each()
+
+Iterates the top-level elements of a JSON array or object.
+
+```sql
+-- Expand a JSON array into rows
+SELECT key, value, type
+FROM   json_each('[10, 20, "hello", null]');
+-- 0   10        integer
+-- 1   20        integer
+-- 2   hello     text
+-- 3   (null)    null
+
+-- Expand a JSON object
+SELECT key, value
+FROM   json_each('{"name":"Alice","age":30}');
+-- name   Alice
+-- age    30
+
+-- Use with a table column
+SELECT u.name, j.value AS tag
+FROM   users u, json_each(u.tags_json) j
+WHERE  j.value LIKE 'admin%';
+```
+
+### json_tree()
+
+Recursively walks the entire JSON document, returning every node at every level.
+
+```sql
+SELECT path, type, value
+FROM   json_tree('{"a":{"b":[1,2]}}')
+ORDER  BY path;
+-- $           object  {"a":{"b":[1,2]}}
+-- $.a         object  {"b":[1,2]}
+-- $.a.b       array   [1,2]
+-- $.a.b[0]    integer 1
+-- $.a.b[1]    integer 2
+```
+
+Both functions accept an optional second argument to start traversal at a subpath:
+
+```sql
+SELECT value FROM json_each('{"users":[1,2,3]}', '$.users');
+-- 1
+-- 2
+-- 3
+```
+
+---
+
+## Aggregate JSON Functions
+
+```sql
+-- Build a JSON array from grouped rows
+SELECT dept, json_group_array(name) AS members
+FROM   employees
+GROUP  BY dept;
+-- Engineering   '["Alice","Bob"]'
+
+-- Build a JSON object from grouped key-value rows
+SELECT json_group_object(key, value) AS config
+FROM   settings;
+-- '{"theme":"dark","lang":"en"}'
+```
+
+---
+
+## JSONB — Binary JSON Format
+
+Available from **SQLite 3.45.0**, JSONB is a compact binary encoding of JSON stored as a `BLOB`. It is faster to parse (roughly 2x fewer CPU cycles) and 5–10% smaller than text JSON.
+
+<Note>
+JSONB is an internal SQLite format, not compatible with PostgreSQL's JSONB. Application code should always access JSONB through SQLite's JSON functions — never inspect the raw bytes.
+</Note>
+
+### Converting Between Text JSON and JSONB
+
+```sql
+-- Text JSON → JSONB blob
+SELECT jsonb('{"name":"Alice","age":30}');
+-- returns a BLOB
+
+-- JSONB blob → canonical text JSON
+SELECT json(jsonb('{"name":"Alice","age":30}'));
+-- '{"name":"Alice","age":30}'
+```
+
+### JSONB Variants of All Functions
+
+Every JSON function has a `jsonb_` prefixed counterpart that returns JSONB (BLOB) instead of text JSON:
+
+```sql
+SELECT jsonb_array(1, 2, 3);                       -- BLOB form of [1,2,3]
+SELECT jsonb_object('a', 1, 'b', 'two');           -- BLOB
+SELECT jsonb_extract('{"a":1}', '$.a');            -- BLOB if result is object/array
+SELECT jsonb_insert(jsonb('{"a":1}'), '$.b', 2);   -- BLOB
+SELECT jsonb_set(col_blob, '$.status', 'active') FROM docs;
+
+-- Table-valued functions also have jsonb variants
+SELECT key, value FROM jsonb_each(col_blob);
+SELECT path, type  FROM jsonb_tree(col_blob);
+```
+
+### Storing JSON: TEXT vs. BLOB
+
+<Tabs>
+  <Tab title="TEXT column (text JSON)">
+    ```sql
+    CREATE TABLE events (
+      id   INTEGER PRIMARY KEY,
+      data TEXT    -- stores RFC 8259 JSON text
+    );
+
+    INSERT INTO events (data)
+    VALUES ('{"type":"click","x":100,"y":200}');
+
+    -- Reading requires no conversion
+    SELECT data ->> '$.type' FROM events WHERE id = 1;
+    ```
+    **Pros:** Human-readable; compatible with any tool.  
+    **Cons:** Slower parsing; slightly larger on disk.
+  </Tab>
+  <Tab title="BLOB column (JSONB)">
+    ```sql
+    CREATE TABLE events (
+      id   INTEGER PRIMARY KEY,
+      data BLOB    -- stores binary JSONB
+    );
+
+    INSERT INTO events (data)
+    VALUES (jsonb('{"type":"click","x":100,"y":200}'));
+
+    -- All JSON functions accept JSONB blobs transparently
+    SELECT data ->> '$.type' FROM events WHERE id = 1;
+
+    -- Convert back to text for display
+    SELECT json(data) FROM events WHERE id = 1;
+    ```
+    **Pros:** Faster processing; smaller storage.  
+    **Cons:** Not human-readable; requires json() to export.
+  </Tab>
+</Tabs>
+
+---
+
+## Real-World Query Examples
+
+### Filter Rows by JSON Field Value
+
+```sql
+-- Find all events from the 'us-east-1' region
+SELECT id, data ->> '$.timestamp' AS ts
+FROM   events
+WHERE  data ->> '$.region' = 'us-east-1';
+```
+
+### Index a JSON Field for Fast Lookup
+
+```sql
+CREATE INDEX idx_events_region
+ON events(json_extract(data, '$.region'));
+
+-- This query now uses the index
+SELECT * FROM events WHERE json_extract(data, '$.region') = 'us-east-1';
+```
+
+### Aggregate Values Inside JSON Arrays
+
+```sql
+-- Count total items across all cart JSON blobs
+SELECT u.name, SUM(j.value ->> '$.qty') AS total_items
+FROM   users u
+JOIN   carts c ON c.user_id = u.id,
+       json_each(c.items_json) j
+GROUP  BY u.id;
+```
+
+### Update a JSON Field In-Place
+
+```sql
+UPDATE events
+SET    data = json_set(data, '$.processed', 1)
+WHERE  id = 42;
+```
+
+### Expand JSON Array into a Relational Result
+
+```sql
+-- tags_json = '["sqlite","database","performance"]'
+SELECT u.id, u.name, trim(j.value) AS tag
+FROM   users u, json_each(u.tags_json) j
+ORDER  BY tag;
+```

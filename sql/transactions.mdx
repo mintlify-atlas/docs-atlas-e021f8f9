@@ -1,0 +1,285 @@
+---
+title: "Transactions, Locking, and WAL Mode in SQLite"
+sidebarTitle: "Transactions"
+description: "Complete guide to SQLite transactions: BEGIN/COMMIT/ROLLBACK, savepoints, the five-level locking model, WAL mode, journal modes, and busy timeout pragmas."
+---
+
+SQLite provides full ACID transactions with serializable isolation for writers. Every change to the database happens within a transaction — if you don't issue `BEGIN` explicitly, SQLite wraps each statement in an implicit single-statement transaction (autocommit mode). Understanding the transaction and locking model is crucial for building reliable, concurrent applications.
+
+## BEGIN, COMMIT, and ROLLBACK
+
+```sql
+BEGIN;              -- or BEGIN DEFERRED (the default)
+INSERT INTO orders (user_id, amount) VALUES (1, 99.99);
+UPDATE  users SET balance = balance - 99.99 WHERE id = 1;
+COMMIT;
+
+-- Roll back on error
+BEGIN;
+INSERT INTO orders VALUES (...);
+-- if something fails:
+ROLLBACK;
+```
+
+### Transaction Types
+
+SQLite supports three transaction-begin forms, which affect when the first lock is acquired:
+
+<Tabs>
+  <Tab title="DEFERRED (default)">
+    No lock is acquired until the first read or write operation. The transaction starts with no lock and escalates as needed.
+
+    ```sql
+    BEGIN DEFERRED;
+    -- Lock acquired on first I/O operation
+    SELECT * FROM users LIMIT 1;  -- acquires SHARED lock here
+    COMMIT;
+    ```
+  </Tab>
+  <Tab title="IMMEDIATE">
+    Acquires a `RESERVED` lock immediately, preventing other writers from starting a write transaction. Readers can still proceed.
+
+    ```sql
+    BEGIN IMMEDIATE;
+    -- RESERVED lock held — other writers blocked, readers OK
+    UPDATE config SET value = 'x' WHERE key = 'mode';
+    COMMIT;
+    ```
+  </Tab>
+  <Tab title="EXCLUSIVE">
+    Acquires an `EXCLUSIVE` lock immediately. No other connection may read or write until the transaction ends.
+
+    ```sql
+    BEGIN EXCLUSIVE;
+    -- EXCLUSIVE lock — all other connections blocked
+    PRAGMA integrity_check;
+    COMMIT;
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## Savepoints
+
+Savepoints give you nested transaction semantics. They are fully supported in SQLite and can be used inside or outside of an explicit `BEGIN` block.
+
+```sql
+BEGIN;
+
+INSERT INTO accounts (name) VALUES ('Alice');
+SAVEPOINT sp1;
+
+INSERT INTO accounts (name) VALUES ('Bob');
+SAVEPOINT sp2;
+
+-- Oops — roll back to sp2 (undoes Bob row)
+ROLLBACK TO SAVEPOINT sp2;
+
+-- Bob is gone; Alice is still pending
+RELEASE SAVEPOINT sp1;
+
+COMMIT;  -- commits Alice
+```
+
+<Note>
+`RELEASE savepoint_name` is analogous to committing a savepoint — it merges the savepoint's changes into the enclosing transaction. It does **not** write to disk; the outer `COMMIT` does that.
+</Note>
+
+```sql
+-- Savepoints work without an explicit BEGIN too (auto-transaction is created)
+SAVEPOINT outer;
+  INSERT INTO log VALUES ('step 1');
+  SAVEPOINT inner;
+    INSERT INTO log VALUES ('step 2');
+  ROLLBACK TO inner;
+RELEASE outer;   -- commits only 'step 1'
+```
+
+---
+
+## Isolation Levels
+
+SQLite uses a **serializable** isolation level for writers. At any point in time:
+
+- Multiple connections may hold `SHARED` (read) locks simultaneously.
+- Only one connection may hold a `RESERVED` or higher lock at a time.
+- A writer therefore sees a fully consistent snapshot of the database from the moment its first write lock is acquired.
+
+There is no "read committed" or "repeatable read" mode — readers in journal mode see the last committed state at the time they acquire a `SHARED` lock. In **WAL mode** (see below), readers see the last committed state when the transaction begins, making reads genuinely non-blocking.
+
+---
+
+## File-Level Locking Model
+
+SQLite coordinates concurrent access through a five-level file locking protocol defined in `sqlite.h.in`:
+
+| Lock Level | Constant | Description |
+|---|---|---|
+| **NONE** | `SQLITE_LOCK_NONE` (0) | No lock held |
+| **SHARED** | `SQLITE_LOCK_SHARED` (1) | Read in progress; many connections may share |
+| **RESERVED** | `SQLITE_LOCK_RESERVED` (2) | Intent to write; new readers still allowed |
+| **PENDING** | `SQLITE_LOCK_PENDING` (3) | Waiting for existing readers to finish |
+| **EXCLUSIVE** | `SQLITE_LOCK_EXCLUSIVE` (4) | Write in progress; no other access allowed |
+
+The progression is strictly: `NONE → SHARED → RESERVED → PENDING → EXCLUSIVE`.
+
+```
+Connection A: SHARED ──────────────────────────────────> (reading)
+Connection B:          RESERVED ──> PENDING ──> EXCLUSIVE ──> NONE
+                                    (waits for A to release SHARED)
+```
+
+<Warning>
+Applications that hold a database connection open across multiple threads must serialize access themselves. SQLite's locking protects against concurrent processes, but within a single process the threading mode matters — compile with `SQLITE_THREADSAFE=1` (the default) for serialized or multi-thread modes.
+</Warning>
+
+---
+
+## Journal Modes
+
+SQLite maintains a rollback journal to enable crash recovery and atomicity. The journal mode controls how that journal is managed.
+
+```sql
+PRAGMA journal_mode;             -- query current mode
+PRAGMA journal_mode = WAL;       -- switch to WAL
+```
+
+| Mode | Description |
+|---|---|
+| `DELETE` | Default. Journal file is deleted after each transaction. |
+| `TRUNCATE` | Journal is truncated to zero length (faster than deletion on some filesystems). |
+| `PERSIST` | Journal header is zeroed but file kept; avoids re-creating the file. |
+| `MEMORY` | Journal stored in RAM; no durability if process crashes. |
+| `WAL` | Write-Ahead Log — concurrent reads and one writer allowed simultaneously. |
+| `OFF` | No journal; no rollback or crash recovery. Dangerous — use only for scratch data. |
+
+---
+
+## WAL Mode
+
+WAL (Write-Ahead Log) mode is the recommended journal mode for most applications. Instead of writing changes directly to the database file, SQLite appends them to a separate WAL file and later *checkpoints* them back.
+
+### Enabling WAL
+
+```sql
+PRAGMA journal_mode = WAL;
+-- Returns 'wal' on success
+```
+
+<Tip>
+`PRAGMA journal_mode` is persistent — it survives connection close and database reopen. You only need to set it once per database file.
+</Tip>
+
+### WAL Advantages
+
+- **Concurrent readers and one writer** can operate simultaneously without blocking each other.
+- **Readers never block writers** — they read from the last committed snapshot.
+- **Faster write throughput** because writes are sequential appends to the WAL file, not random writes to the database.
+
+### WAL Checkpointing
+
+SQLite checkpoints automatically when the WAL reaches 1,000 pages (default). You can also trigger it manually:
+
+```sql
+PRAGMA wal_checkpoint;           -- passive checkpoint (no blocking)
+PRAGMA wal_checkpoint(FULL);     -- wait for all readers to clear, then checkpoint
+PRAGMA wal_checkpoint(RESTART);  -- like FULL, then resets WAL write position
+PRAGMA wal_checkpoint(TRUNCATE); -- like RESTART, then truncates the WAL file
+```
+
+<Note>
+WAL mode creates two extra files alongside your database: `mydb.db-wal` and `mydb.db-shm`. These must stay together with the main database file.
+</Note>
+
+---
+
+## PRAGMA busy_timeout
+
+When a connection cannot acquire a lock because another connection holds one, SQLite returns `SQLITE_BUSY` immediately by default. `busy_timeout` sets a maximum wait time in milliseconds before giving up.
+
+```sql
+PRAGMA busy_timeout = 5000;  -- wait up to 5 seconds
+PRAGMA busy_timeout;         -- query current value (0 = no wait)
+```
+
+This is equivalent to calling `sqlite3_busy_timeout()` from C:
+
+```c
+sqlite3_busy_timeout(db, 5000);  /* wait up to 5000 ms */
+```
+
+---
+
+## PRAGMA locking_mode
+
+Controls whether locks are released at the end of each transaction.
+
+```sql
+PRAGMA locking_mode = NORMAL;     -- default: release locks after each transaction
+PRAGMA locking_mode = EXCLUSIVE;  -- hold EXCLUSIVE lock for the lifetime of the connection
+```
+
+`EXCLUSIVE` locking mode prevents any other process from reading or writing while your connection is open. It is useful for single-user desktop applications where simplicity matters more than concurrency.
+
+---
+
+## Common Transaction Patterns
+
+### Pattern 1: Retry on SQLITE_BUSY
+
+```c
+int rc;
+do {
+    rc = sqlite3_exec(db, "BEGIN IMMEDIATE", 0, 0, 0);
+} while (rc == SQLITE_BUSY);
+
+/* do work */
+
+sqlite3_exec(db, "COMMIT", 0, 0, 0);
+```
+
+### Pattern 2: Batch Inserts in a Single Transaction
+
+Wrapping many inserts in a single transaction is dramatically faster than autocommit mode (which issues one transaction per statement):
+
+```sql
+BEGIN;
+INSERT INTO events VALUES (1, 'login',  '2024-06-01');
+INSERT INTO events VALUES (2, 'click',  '2024-06-01');
+-- ... thousands more rows ...
+COMMIT;
+```
+
+### Pattern 3: Savepoints for Partial Rollback
+
+```c
+sqlite3_exec(db, "SAVEPOINT batch", 0, 0, 0);
+
+for (int i = 0; i < n; i++) {
+    int rc = insert_row(db, rows[i]);
+    if (rc != SQLITE_OK) {
+        sqlite3_exec(db, "ROLLBACK TO batch", 0, 0, 0);
+        break;
+    }
+}
+
+sqlite3_exec(db, "RELEASE batch", 0, 0, 0);
+```
+
+### Pattern 4: WAL + busy_timeout for Web Servers
+
+```sql
+PRAGMA journal_mode = WAL;
+PRAGMA busy_timeout = 3000;
+PRAGMA synchronous = NORMAL;   -- safe with WAL; faster than FULL
+```
+
+<CardGroup cols={2}>
+  <Card title="WAL Mode" icon="bolt">
+    Best for applications with many concurrent readers and occasional writers. Enables true parallel reads.
+  </Card>
+  <Card title="DELETE Mode" icon="shield">
+    Best for embedded or single-user apps. Simpler file management — only one database file to track.
+  </Card>
+</CardGroup>

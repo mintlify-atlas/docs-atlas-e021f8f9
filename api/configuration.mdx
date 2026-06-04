@@ -1,0 +1,348 @@
+---
+title: "Configuring SQLite with sqlite3_config and sqlite3_db_config"
+sidebarTitle: "Configuration"
+description: "Configure SQLite globally with sqlite3_config and per-connection with sqlite3_db_config, including threading, memory, logging, busy handling, and interrupt."
+---
+
+SQLite provides two configuration interfaces: `sqlite3_config()` for global library-wide settings that affect every connection, and `sqlite3_db_config()` for per-connection settings that tune behavior on a single `sqlite3` handle. Global configuration must generally be applied before the library is initialized; per-connection configuration can be changed at any time. Understanding which knob lives at which level is essential for building correct, performant SQLite applications.
+
+## Library Initialization and Shutdown
+
+Before diving into configuration, it helps to understand the lifecycle functions that bracket it.
+
+```c
+int sqlite3_initialize(void);
+int sqlite3_shutdown(void);
+```
+
+`sqlite3_initialize()` initializes the SQLite library. It is called automatically by `sqlite3_open()` and other entry points unless SQLite is compiled with `SQLITE_OMIT_AUTOINIT`. `sqlite3_shutdown()` releases all resources allocated by `sqlite3_initialize()`. All database connections must be closed before calling `sqlite3_shutdown()`.
+
+<Note>
+  Most applications never need to call these functions directly. They are primarily useful in embedded systems or when you need to call `sqlite3_config()` before any other SQLite API.
+</Note>
+
+## sqlite3_config — Global Configuration
+
+```c
+int sqlite3_config(int option, ...);
+```
+
+`sqlite3_config()` accepts a configuration verb as its first argument, followed by zero or more additional arguments whose types depend on the verb. It must be called before `sqlite3_initialize()` (or after `sqlite3_shutdown()`) for most options; calling it while the library is active returns `SQLITE_MISUSE` unless the option is an "anytime" option.
+
+<Warning>
+  `sqlite3_config()` is **not thread-safe**. No other SQLite interfaces may be invoked concurrently from other threads while `sqlite3_config()` is running.
+</Warning>
+
+### Threading Mode Options
+
+<Expandable title="SQLITE_CONFIG_SINGLETHREAD">
+  Disables all mutexing. SQLite may only be used from a single thread. Provides maximum performance when you can guarantee single-threaded access.
+
+  ```c
+  sqlite3_config(SQLITE_CONFIG_SINGLETHREAD);
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_CONFIG_MULTITHREAD">
+  Enables per-connection mutexing but not per-object mutexing. Multiple threads may use SQLite concurrently as long as each thread uses its own database connection. Two threads must never share the same connection simultaneously.
+
+  ```c
+  sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_CONFIG_SERIALIZED">
+  Enables full mutexing. Multiple threads may safely share the same database connection. SQLite serializes all access with mutexes. This is the safest but slowest threading mode.
+
+  ```c
+  sqlite3_config(SQLITE_CONFIG_SERIALIZED);
+  ```
+</Expandable>
+
+### Memory Allocation Options
+
+<Expandable title="SQLITE_CONFIG_MALLOC / SQLITE_CONFIG_GETMALLOC">
+  Replace or retrieve SQLite's memory allocator. The argument is a pointer to an `sqlite3_mem_methods` struct that defines `xMalloc`, `xFree`, `xRealloc`, and related functions.
+
+  ```c
+  sqlite3_mem_methods my_mem;
+  /* ... fill in my_mem ... */
+  sqlite3_config(SQLITE_CONFIG_MALLOC, &my_mem);
+
+  /* Retrieve the current allocator */
+  sqlite3_mem_methods current_mem;
+  sqlite3_config(SQLITE_CONFIG_GETMALLOC, &current_mem);
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_CONFIG_MEMSTATUS">
+  Enable or disable memory allocation statistics. When disabled, `sqlite3_memory_used()`, `sqlite3_memory_highwater()`, and `sqlite3_status()` become non-operational, but memory operations are faster.
+
+  ```c
+  /* Disable memory statistics for better performance */
+  sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0);
+
+  /* Enable (the default) */
+  sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 1);
+  ```
+</Expandable>
+
+### Logging
+
+<Expandable title="SQLITE_CONFIG_LOG">
+  Install a global error log callback. This is an "anytime" configuration option and may be called at any time, even after initialization.
+
+  ```c
+  void my_log_callback(void *pArg, int errCode, const char *zMsg) {
+      fprintf(stderr, "SQLite [%d]: %s\n", errCode, zMsg);
+  }
+
+  /* Install logger */
+  sqlite3_config(SQLITE_CONFIG_LOG, my_log_callback, NULL);
+
+  /* Remove logger */
+  sqlite3_config(SQLITE_CONFIG_LOG, NULL, NULL);
+  ```
+
+  The callback receives the user-supplied `pArg`, an error/result code, and a formatted log message. The callback must not invoke any SQLite interfaces and must be thread-safe.
+</Expandable>
+
+### URI Handling
+
+<Expandable title="SQLITE_CONFIG_URI">
+  Enable or disable global URI filename interpretation. When enabled, all filenames passed to `sqlite3_open()` and related functions are treated as URIs regardless of the `SQLITE_OPEN_URI` flag.
+
+  ```c
+  sqlite3_config(SQLITE_CONFIG_URI, 1);  /* enable globally */
+  sqlite3_config(SQLITE_CONFIG_URI, 0);  /* disable (default) */
+  ```
+</Expandable>
+
+### Memory-Mapped I/O
+
+<Expandable title="SQLITE_CONFIG_MMAP_SIZE">
+  Set the default and maximum allowed mmap size limits (in bytes). Takes two `sqlite3_int64` arguments.
+
+  ```c
+  sqlite3_int64 default_mmap = 1024 * 1024 * 256;  /* 256 MB default */
+  sqlite3_int64 max_mmap     = 1024 * 1024 * 1024; /* 1 GB maximum */
+  sqlite3_config(SQLITE_CONFIG_MMAP_SIZE, default_mmap, max_mmap);
+  ```
+</Expandable>
+
+### Page Cache
+
+<Expandable title="SQLITE_CONFIG_PCACHE2">
+  Install a custom page cache implementation. The argument is a pointer to an `sqlite3_pcache_methods2` object.
+
+  ```c
+  sqlite3_pcache_methods2 my_cache;
+  /* ... fill in my_cache ... */
+  sqlite3_config(SQLITE_CONFIG_PCACHE2, &my_cache);
+  ```
+</Expandable>
+
+---
+
+## sqlite3_db_config — Per-Connection Configuration
+
+```c
+int sqlite3_db_config(sqlite3 *db, int option, ...);
+```
+
+`sqlite3_db_config()` makes configuration changes to a single database connection. It can be called at any time after the connection is opened. Returns `SQLITE_OK` on success.
+
+### Schema Name
+
+<Expandable title="SQLITE_DBCONFIG_MAINDBNAME">
+  Change the name of the main database schema from `"main"` to a custom name. The string pointer must remain valid for the lifetime of the connection.
+
+  ```c
+  sqlite3_db_config(db, SQLITE_DBCONFIG_MAINDBNAME, "primary");
+  ```
+</Expandable>
+
+### Lookaside Memory
+
+<Expandable title="SQLITE_DBCONFIG_LOOKASIDE">
+  Reconfigure the lookaside memory allocator for this connection. Lookaside memory is a fast, fixed-size pool that reduces malloc overhead for small allocations. Takes three arguments: a buffer pointer (or NULL for SQLite to allocate), slot size in bytes, and slot count.
+
+  ```c
+  /* Use 100 slots of 1200 bytes each; let SQLite allocate the buffer */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_LOOKASIDE, NULL, 1200, 100);
+
+  /* Disable lookaside entirely */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_LOOKASIDE, NULL, 0, 0);
+  ```
+
+  Lookaside cannot be reconfigured while it is in use (returns `SQLITE_BUSY`).
+</Expandable>
+
+### Feature Toggles
+
+Most feature-toggle options follow a common pattern: the first extra argument is an integer (`0` = disable, positive = enable, negative = no change), and the second is an `int *` that receives the resulting state (may be `NULL`).
+
+<Expandable title="SQLITE_DBCONFIG_ENABLE_FKEY">
+  Enable or disable enforcement of foreign key constraints. Equivalent to `PRAGMA foreign_keys`.
+
+  ```c
+  int enabled;
+  sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FKEY, 1, &enabled);
+  printf("FK enforcement is now: %s\n", enabled ? "on" : "off");
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_DBCONFIG_ENABLE_TRIGGER">
+  Enable or disable triggers. When disabled, triggers in the main and attached database schemas are not fired. Temporary triggers remain active even when this is off (since SQLite 3.35.0).
+
+  ```c
+  sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_TRIGGER, 0, NULL); /* disable */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_TRIGGER, 1, NULL); /* enable */
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION">
+  Enable or disable the `sqlite3_load_extension()` C API without affecting the `load_extension()` SQL function. Passing `1` enables only the C API; `0` disables both.
+
+  ```c
+  sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 1, NULL);
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_DBCONFIG_DEFENSIVE">
+  Activate "defensive mode," which disables language features that could be used to deliberately corrupt the database file. Disabled features include `PRAGMA writable_schema=ON`, `PRAGMA journal_mode=OFF`, and direct writes to shadow tables.
+
+  ```c
+  sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, NULL); /* enable */
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_DBCONFIG_WRITABLE_SCHEMA">
+  Enable or disable the writable schema. Equivalent to `PRAGMA writable_schema=ON/OFF`. Allows direct modification of `sqlite_master`.
+
+  ```c
+  sqlite3_db_config(db, SQLITE_DBCONFIG_WRITABLE_SCHEMA, 1, NULL);
+  ```
+</Expandable>
+
+<Expandable title="SQLITE_DBCONFIG_DQS_DDL and SQLITE_DBCONFIG_DQS_DML">
+  Control whether double-quoted string literals are allowed in DDL and DML statements respectively. SQLite historically treated double-quoted strings as string literals when no matching column name was found; this is considered a misfeature. Disable both for stricter SQL compliance.
+
+  ```c
+  /* Disable double-quoted string literals in DML (SELECT, INSERT, etc.) */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DML, 0, NULL);
+
+  /* Disable double-quoted string literals in DDL (CREATE TABLE, etc.) */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DDL, 0, NULL);
+  ```
+</Expandable>
+
+---
+
+## Busy Handler and Timeout
+
+When SQLite tries to access a database that is locked by another connection or process, the behavior is governed by the busy handler.
+
+### sqlite3_busy_handler
+
+```c
+int sqlite3_busy_handler(sqlite3 *db, int (*callback)(void*, int), void *pArg);
+```
+
+Installs a callback that is invoked whenever a table or database is locked. The callback receives `pArg` and a count of how many times it has been called for this locking event. If the callback returns non-zero, SQLite retries the operation. If it returns zero, `sqlite3_step()` returns `SQLITE_BUSY`.
+
+```c
+int my_busy_handler(void *pArg, int count) {
+    if (count < 10) {
+        /* Sleep 10ms and retry */
+        usleep(10000);
+        return 1;
+    }
+    return 0;  /* Give up after 10 retries */
+}
+
+sqlite3_busy_handler(db, my_busy_handler, NULL);
+```
+
+<Warning>
+  The busy handler must not close the database connection or the prepared statement that invoked it. It is not reentrant.
+</Warning>
+
+### sqlite3_busy_timeout
+
+```c
+int sqlite3_busy_timeout(sqlite3 *db, int ms);
+```
+
+A convenience function that installs a built-in busy handler that sleeps for up to `ms` milliseconds total before giving up and returning `SQLITE_BUSY`. Calling this clears any previously set `sqlite3_busy_handler()` callback. Pass `0` or a negative value to disable the timeout.
+
+```c
+/* Retry for up to 5 seconds before returning SQLITE_BUSY */
+sqlite3_busy_timeout(db, 5000);
+```
+
+---
+
+## Interrupting Operations
+
+### sqlite3_interrupt
+
+```c
+void sqlite3_interrupt(sqlite3 *db);
+```
+
+Causes any pending database operation on `db` to abort at its earliest opportunity and return `SQLITE_INTERRUPT`. This is typically called from a signal handler or a separate thread in response to user input (e.g., pressing Ctrl-C). It is safe to call from a different thread than the one running the query.
+
+```c
+/* Called from a signal handler or cancel button */
+sqlite3_interrupt(db);
+```
+
+### sqlite3_is_interrupted
+
+```c
+int sqlite3_is_interrupted(sqlite3 *db);
+```
+
+Returns `1` if an interrupt is currently in effect for the connection, `0` otherwise. Useful for polling interrupt status without triggering it.
+
+---
+
+## Common Configuration Patterns
+
+<CodeGroup>
+
+```c Set up multithreaded app
+/* Before any sqlite3_open() calls */
+sqlite3_config(SQLITE_CONFIG_MULTITHREAD);
+sqlite3_config(SQLITE_CONFIG_LOG, error_logger, NULL);
+sqlite3_config(SQLITE_CONFIG_MEMSTATUS, 0); /* disable stats for speed */
+sqlite3_initialize();
+
+/* Then open connections as needed */
+sqlite3 *db;
+sqlite3_open_v2("app.db", &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL);
+sqlite3_busy_timeout(db, 3000);
+```
+
+```c Harden a connection
+sqlite3 *db;
+sqlite3_open_v2("untrusted.db", &db, SQLITE_OPEN_READONLY, NULL);
+
+/* Restrict what the database can do */
+sqlite3_db_config(db, SQLITE_DBCONFIG_DEFENSIVE, 1, NULL);
+sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FKEY, 1, NULL);
+sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DML, 0, NULL);
+sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DDL, 0, NULL);
+```
+
+```c Enable foreign keys per connection
+sqlite3 *db;
+sqlite3_open("app.db", &db);
+
+int fk_on = 0;
+sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_FKEY, 1, &fk_on);
+printf("Foreign keys enabled: %s\n", fk_on ? "yes" : "no");
+```
+
+</CodeGroup>

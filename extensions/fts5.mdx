@@ -1,0 +1,384 @@
+---
+title: "FTS5: Full-Text Search Extension for SQLite"
+sidebarTitle: "FTS5"
+description: "Deep dive into FTS5: creating full-text indexes, MATCH query syntax, BM25 ranking, highlight and snippet functions, external content tables, and custom tokenizers."
+---
+
+FTS5 is SQLite's fifth-generation full-text search virtual table module. It indexes the text of one or more columns and lets you search for words or phrases with a `MATCH` expression, returning results in relevance order using the BM25 ranking algorithm. FTS5 supersedes the older FTS3 and FTS4 modules and is enabled at build time with `-DSQLITE_ENABLE_FTS5`.
+
+## Creating an FTS5 Table
+
+A full-text index is created using `CREATE VIRTUAL TABLE ... USING fts5()`. The column names are listed as arguments — there is no type annotation:
+
+```sql
+CREATE VIRTUAL TABLE docs USING fts5(title, body);
+```
+
+Text inserted into `title` and `body` is tokenized and added to the index. The table also has an implicit `rowid` column used to identify rows.
+
+### Content Tables
+
+By default FTS5 stores a copy of all indexed text inside its own shadow tables. For large datasets you can instead use an **external content table** to avoid duplication:
+
+```sql
+-- The real data table
+CREATE TABLE articles (
+  id   INTEGER PRIMARY KEY,
+  title TEXT,
+  body  TEXT
+);
+
+-- FTS5 index that reads content from 'articles'
+CREATE VIRTUAL TABLE articles_fts USING fts5(
+  title, body,
+  content=articles,
+  content_rowid=id
+);
+```
+
+With `content=articles`, FTS5 stores only the index, not the text. You must keep the index in sync manually using triggers:
+
+```sql
+-- Keep the FTS index up to date
+CREATE TRIGGER articles_ai AFTER INSERT ON articles BEGIN
+  INSERT INTO articles_fts(rowid, title, body)
+    VALUES (new.id, new.title, new.body);
+END;
+
+CREATE TRIGGER articles_ad AFTER DELETE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, body)
+    VALUES ('delete', old.id, old.title, old.body);
+END;
+
+CREATE TRIGGER articles_au AFTER UPDATE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, body)
+    VALUES ('delete', old.id, old.title, old.body);
+  INSERT INTO articles_fts(rowid, title, body)
+    VALUES (new.id, new.title, new.body);
+END;
+```
+
+<Note>
+  A **contentless** table (`content=''`) stores only the index but cannot
+  retrieve the original text. It supports `MATCH` queries but auxiliary
+  functions like `highlight()` and `snippet()` will not work.
+</Note>
+
+## Tokenizers
+
+The tokenizer controls how text is broken into terms before indexing. Specify it with the `tokenize` option:
+
+```sql
+CREATE VIRTUAL TABLE docs USING fts5(
+  title, body,
+  tokenize='porter unicode61'
+);
+```
+
+<Tabs>
+  <Tab title="unicode61 (default)">
+    The default tokenizer. It splits on Unicode character boundaries and folds
+    case. Diacritics are removed by default (`remove_diacritics=1`).
+
+    ```sql
+    CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='unicode61');
+    -- Equivalent (default):
+    CREATE VIRTUAL TABLE docs USING fts5(body);
+    ```
+  </Tab>
+  <Tab title="ascii">
+    Splits only on ASCII whitespace and punctuation. Faster but not
+    Unicode-aware. Suitable for pure-ASCII content.
+
+    ```sql
+    CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='ascii');
+    ```
+  </Tab>
+  <Tab title="porter">
+    A wrapper around another tokenizer that applies Porter stemming to reduce
+    words to their root form. Pass the underlying tokenizer as an argument:
+
+    ```sql
+    CREATE VIRTUAL TABLE docs USING fts5(
+      body,
+      tokenize='porter unicode61'
+    );
+    -- 'running' and 'run' now match each other
+    ```
+  </Tab>
+  <Tab title="trigram">
+    Breaks text into 3-character trigrams. Enables substring and LIKE/GLOB
+    matching via the FTS5 index (useful for `LIKE '%keyword%'` queries):
+
+    ```sql
+    CREATE VIRTUAL TABLE docs USING fts5(body, tokenize='trigram');
+
+    -- Efficient substring search:
+    SELECT * FROM docs WHERE body MATCH 'hello';
+    -- Also works for LIKE queries when case_sensitive=0 (default):
+    SELECT * FROM docs WHERE body LIKE '%hello%';
+    ```
+  </Tab>
+</Tabs>
+
+## Inserting and Querying Data
+
+```sql
+INSERT INTO docs(rowid, title, body) VALUES
+  (1, 'SQLite Overview',    'SQLite is a self-contained SQL database engine.'),
+  (2, 'FTS5 Introduction',  'FTS5 provides full-text search for SQLite.'),
+  (3, 'R-Tree Extension',   'The R-Tree extension supports spatial queries.');
+
+-- Basic term search
+SELECT rowid, title FROM docs WHERE docs MATCH 'sqlite';
+
+-- Results:
+-- 1  SQLite Overview
+-- 2  FTS5 Introduction
+-- 3  R-Tree Extension   (via "SQLite" in body)
+```
+
+## MATCH Query Syntax
+
+FTS5 MATCH expressions support a rich query language:
+
+<Accordion title="Simple Terms">
+  Match rows containing the word "database":
+
+  ```sql
+  SELECT * FROM docs WHERE docs MATCH 'database';
+  ```
+</Accordion>
+
+<Accordion title="Phrase Queries">
+  Terms enclosed in double quotes must appear consecutively in the text:
+
+  ```sql
+  SELECT * FROM docs WHERE docs MATCH '"full text search"';
+  ```
+</Accordion>
+
+<Accordion title="Prefix Queries">
+  A trailing asterisk matches any token that begins with the given prefix:
+
+  ```sql
+  -- Matches 'sqlite', 'sqliterc', etc.
+  SELECT * FROM docs WHERE docs MATCH 'sqlite*';
+  ```
+</Accordion>
+
+<Accordion title="Column Filters">
+  Restrict a term to a specific column using `column:term` syntax:
+
+  ```sql
+  -- 'sqlite' must appear in the title column only
+  SELECT * FROM docs WHERE docs MATCH 'title:sqlite';
+  ```
+</Accordion>
+
+<Accordion title="Boolean Operators">
+  FTS5 supports `AND`, `OR`, and `NOT` (uppercase), as well as the implicit
+  `AND` when terms are space-separated:
+
+  ```sql
+  -- Both terms must appear (implicit AND)
+  SELECT * FROM docs WHERE docs MATCH 'sqlite fts5';
+
+  -- Explicit AND
+  SELECT * FROM docs WHERE docs MATCH 'sqlite AND search';
+
+  -- OR
+  SELECT * FROM docs WHERE docs MATCH 'sqlite OR rtree';
+
+  -- NOT (exclude rows containing 'rtree')
+  SELECT * FROM docs WHERE docs MATCH 'sqlite NOT rtree';
+  ```
+</Accordion>
+
+<Accordion title="NEAR Queries">
+  Match rows where terms appear within a certain token distance of each other:
+
+  ```sql
+  -- 'sqlite' and 'database' within 10 tokens of each other
+  SELECT * FROM docs WHERE docs MATCH 'NEAR(sqlite database, 10)';
+  ```
+</Accordion>
+
+## Auxiliary Functions
+
+FTS5 provides built-in auxiliary functions that can only be called from a query against an FTS5 table.
+
+### bm25() — Relevance Ranking
+
+`bm25()` returns a negative floating-point score; rows with scores closer to zero are more relevant. Use it in `ORDER BY` to rank results:
+
+```sql
+SELECT rowid, title, bm25(docs) AS score
+FROM docs
+WHERE docs MATCH 'sqlite'
+ORDER BY bm25(docs);
+-- More negative = more relevant (closer to 0 = less relevant)
+```
+
+You can weight individual columns by passing multipliers. The multipliers correspond to each column in declaration order:
+
+```sql
+-- title matches are 10× more important than body matches
+SELECT rowid, title, bm25(docs, 10.0, 1.0) AS score
+FROM docs
+WHERE docs MATCH 'sqlite'
+ORDER BY bm25(docs, 10.0, 1.0);
+```
+
+### highlight() — Mark Matching Terms
+
+`highlight(table, column_index, open_tag, close_tag)` returns the text of a column with matching terms wrapped in the provided HTML tags:
+
+```sql
+SELECT highlight(docs, 1, '<b>', '</b>') AS highlighted_body
+FROM docs
+WHERE docs MATCH 'sqlite';
+-- Returns: "FTS5 provides full-text search for <b>SQLite</b>."
+```
+
+### snippet() — Extract a Relevant Excerpt
+
+`snippet(table, column_index, open_tag, close_tag, ellipsis, max_tokens)` returns a short excerpt from the column showing the context around a match:
+
+```sql
+SELECT snippet(docs, 1, '<b>', '</b>', '…', 10) AS excerpt
+FROM docs
+WHERE docs MATCH 'full-text search';
+-- Returns: "…FTS5 provides <b>full-text</b> <b>search</b> for SQLite…"
+```
+
+## Configuring Rank
+
+The default ranking function is `bm25()`. You can change it permanently for a table using a special `INSERT` into the FTS table itself:
+
+```sql
+-- Set rank function with custom column weights
+INSERT INTO docs(docs, rank) VALUES('rank', 'bm25(10.0, 1.0)');
+
+-- Now ORDER BY rank uses the custom bm25 weights automatically
+SELECT rowid, title FROM docs WHERE docs MATCH 'sqlite' ORDER BY rank;
+```
+
+## Maintenance Commands
+
+FTS5 shadow tables are maintained automatically on INSERT/UPDATE/DELETE. These special commands allow manual maintenance:
+
+```sql
+-- Rebuild the entire index from scratch
+INSERT INTO docs(docs) VALUES('rebuild');
+
+-- Merge all index segments into one (reduces read amplification)
+INSERT INTO docs(docs) VALUES('optimize');
+
+-- Merge at most nMerge segments, using nPage pages of work
+INSERT INTO docs(docs, rank) VALUES('merge', '4,2');
+
+-- Remove all data from the FTS index
+INSERT INTO docs(docs) VALUES('delete-all');
+
+-- Integrity check (returns rows if corruption detected)
+INSERT INTO docs(docs) VALUES('integrity-check');
+```
+
+## Introspection with fts5vocab
+
+The `fts5vocab` virtual table exposes the content of an FTS5 index. There are three types:
+
+<Tabs>
+  <Tab title="row">
+    One row per unique term. Shows the number of rows the term appears in.
+
+    ```sql
+    CREATE VIRTUAL TABLE v USING fts5vocab(docs, 'row');
+    SELECT term, doc, cnt FROM v ORDER BY doc DESC LIMIT 5;
+    -- term    doc  cnt
+    -- sqlite    3    4
+    -- search    2    2
+    -- fts5      1    1
+    ```
+  </Tab>
+  <Tab title="col">
+    One row per (term, column) pair. Shows how many rows and total occurrences
+    exist per column.
+
+    ```sql
+    CREATE VIRTUAL TABLE v USING fts5vocab(docs, 'col');
+    SELECT term, col, doc, cnt FROM v WHERE term = 'sqlite';
+    -- term    col    doc  cnt
+    -- sqlite  title    1    1
+    -- sqlite  body     3    4
+    ```
+  </Tab>
+  <Tab title="instance">
+    One row per individual token occurrence. Gives exact (rowid, column, offset)
+    position of every match.
+
+    ```sql
+    CREATE VIRTUAL TABLE v USING fts5vocab(docs, 'instance');
+    SELECT term, doc, col, offset FROM v WHERE term = 'sqlite';
+    -- term    doc  col  offset
+    -- sqlite    1    0       0
+    -- sqlite    1    1       2
+    ```
+  </Tab>
+</Tabs>
+
+## Complete Working Example
+
+```sql
+-- Setup
+CREATE TABLE articles (
+  id    INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  body  TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE articles_fts USING fts5(
+  title, body,
+  content=articles,
+  content_rowid=id,
+  tokenize='porter unicode61'
+);
+
+-- Sync triggers
+CREATE TRIGGER a_ai AFTER INSERT ON articles BEGIN
+  INSERT INTO articles_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+CREATE TRIGGER a_ad AFTER DELETE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, body)
+    VALUES ('delete', old.id, old.title, old.body);
+END;
+CREATE TRIGGER a_au AFTER UPDATE ON articles BEGIN
+  INSERT INTO articles_fts(articles_fts, rowid, title, body)
+    VALUES ('delete', old.id, old.title, old.body);
+  INSERT INTO articles_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
+END;
+
+-- Insert data
+INSERT INTO articles(title, body) VALUES
+  ('Getting Started with SQLite', 'SQLite is a fast, embedded relational database.'),
+  ('Full-Text Search in SQLite',  'FTS5 supports phrase and prefix queries.'),
+  ('Spatial Queries with R-Tree', 'R-Tree enables bounding-box spatial searches.');
+
+-- Ranked search with highlighted excerpts
+SELECT
+  a.id,
+  a.title,
+  highlight(articles_fts, 1, '<mark>', '</mark>') AS excerpt,
+  bm25(articles_fts)                              AS score
+FROM articles_fts
+JOIN articles a ON a.id = articles_fts.rowid
+WHERE articles_fts MATCH 'sqlite'
+ORDER BY bm25(articles_fts);
+```
+
+<Tip>
+  Porter stemming means a query for `search` will also match `searching`,
+  `searched`, and `searches`. Use `tokenize='unicode61'` (no porter) when you
+  need exact-term matching only.
+</Tip>

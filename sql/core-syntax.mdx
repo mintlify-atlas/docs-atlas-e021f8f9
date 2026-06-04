@@ -1,0 +1,314 @@
+---
+title: "SQLite SQL Syntax: SELECT, INSERT, UPDATE, DELETE"
+sidebarTitle: "Core Syntax"
+description: "Complete reference for SQLite's core SQL statements: CREATE TABLE, SELECT, INSERT, UPDATE, DELETE, CTEs, JOINs, UPSERT, and SQLite-specific extensions."
+---
+
+SQLite implements a substantial subset of SQL-92 with several modern extensions including Common Table Expressions (CTEs), upsert via `ON CONFLICT DO UPDATE`, `RETURNING` clauses, and `WITHOUT ROWID` tables. This page walks through every major statement category with working examples drawn directly from SQLite's grammar.
+
+## Table DDL
+
+### CREATE TABLE
+
+```sql
+-- Standard table with typed columns and constraints
+CREATE TABLE IF NOT EXISTS users (
+  id      INTEGER PRIMARY KEY,
+  name    TEXT    NOT NULL,
+  email   TEXT    UNIQUE,
+  score   REAL    DEFAULT 0.0,
+  created TEXT    DEFAULT (datetime('now'))
+);
+
+-- WITHOUT ROWID table (B-tree keyed on PRIMARY KEY, no implicit rowid)
+CREATE TABLE coords (
+  lat  REAL,
+  lon  REAL,
+  tag  TEXT,
+  PRIMARY KEY (lat, lon)
+) WITHOUT ROWID;
+```
+
+<Note>
+`INTEGER PRIMARY KEY` is a special case: it becomes an alias for SQLite's 64-bit signed `rowid`. `WITHOUT ROWID` tables must declare a `PRIMARY KEY` and store rows directly in the B-tree indexed by that key — there is no separate rowid column.
+</Note>
+
+### ALTER TABLE
+
+SQLite supports a focused set of `ALTER TABLE` operations:
+
+```sql
+-- Rename a table
+ALTER TABLE users RENAME TO accounts;
+
+-- Add a new column (cannot have UNIQUE or PRIMARY KEY)
+ALTER TABLE accounts ADD COLUMN bio TEXT;
+
+-- Rename a column
+ALTER TABLE accounts RENAME COLUMN bio TO biography;
+
+-- Drop a column
+ALTER TABLE accounts DROP COLUMN biography;
+```
+
+<Warning>
+SQLite does not support `ALTER TABLE … ALTER COLUMN` to change a column's type or constraints (except `DROP NOT NULL` and `SET NOT NULL` in recent builds). Use `CREATE TABLE … AS SELECT …` + rename for complex schema migrations.
+</Warning>
+
+### DROP TABLE
+
+```sql
+DROP TABLE IF EXISTS accounts;
+```
+
+---
+
+## SELECT
+
+### Basic SELECT
+
+```sql
+SELECT id, name, score
+FROM   users
+WHERE  score > 50.0
+ORDER  BY score DESC
+LIMIT  10
+OFFSET 20;
+```
+
+### GROUP BY and HAVING
+
+```sql
+SELECT   country, COUNT(*) AS total, AVG(score) AS avg_score
+FROM     users
+GROUP BY country
+HAVING   COUNT(*) > 5
+ORDER BY avg_score DESC;
+```
+
+### JOINs
+
+SQLite supports `INNER JOIN`, `LEFT JOIN` (also `LEFT OUTER JOIN`), `CROSS JOIN`, and `NATURAL JOIN`. `RIGHT JOIN` and `FULL OUTER JOIN` are available from SQLite 3.39.0 onwards.
+
+<Tabs>
+  <Tab title="INNER JOIN">
+    ```sql
+    SELECT u.name, o.amount
+    FROM   users u
+    INNER JOIN orders o ON o.user_id = u.id
+    WHERE  o.amount > 100;
+    ```
+  </Tab>
+  <Tab title="LEFT JOIN">
+    ```sql
+    -- All users, including those with no orders
+    SELECT u.name, COALESCE(SUM(o.amount), 0) AS total
+    FROM   users u
+    LEFT JOIN orders o ON o.user_id = u.id
+    GROUP BY u.id;
+    ```
+  </Tab>
+  <Tab title="CROSS JOIN">
+    ```sql
+    -- Cartesian product
+    SELECT a.color, b.size
+    FROM   colors a
+    CROSS JOIN sizes b;
+    ```
+  </Tab>
+  <Tab title="NATURAL JOIN">
+    ```sql
+    -- Joins on all columns with identical names
+    SELECT * FROM users NATURAL JOIN profiles;
+    ```
+  </Tab>
+</Tabs>
+
+### Subqueries
+
+```sql
+-- Scalar subquery in WHERE
+SELECT name FROM users
+WHERE  score = (SELECT MAX(score) FROM users);
+
+-- EXISTS subquery
+SELECT name FROM users u
+WHERE  EXISTS (
+  SELECT 1 FROM orders o WHERE o.user_id = u.id AND o.amount > 500
+);
+
+-- Subquery in FROM (derived table)
+SELECT avg_score
+FROM (
+  SELECT AVG(score) AS avg_score FROM users WHERE active = 1
+) AS sub;
+```
+
+### Common Table Expressions (CTEs)
+
+CTEs are introduced with the `WITH` keyword and can be recursive.
+
+```sql
+-- Non-recursive CTE
+WITH high_scorers AS (
+  SELECT id, name, score
+  FROM   users
+  WHERE  score >= 90
+)
+SELECT hs.name, COUNT(o.id) AS orders
+FROM   high_scorers hs
+LEFT JOIN orders o ON o.user_id = hs.id
+GROUP BY hs.id;
+
+-- Recursive CTE (build integers 1..10)
+WITH RECURSIVE cnt(n) AS (
+  SELECT 1
+  UNION ALL
+  SELECT n + 1 FROM cnt WHERE n < 10
+)
+SELECT n FROM cnt;
+```
+
+---
+
+## INSERT
+
+### VALUES
+
+```sql
+INSERT INTO users (name, email, score)
+VALUES ('Alice', 'alice@example.com', 92.5);
+
+-- Multi-row insert
+INSERT INTO users (name, email) VALUES
+  ('Bob',   'bob@example.com'),
+  ('Carol', 'carol@example.com');
+```
+
+### INSERT … SELECT
+
+```sql
+INSERT INTO archive_users (id, name)
+SELECT id, name FROM users WHERE created < date('now', '-1 year');
+```
+
+### DEFAULT VALUES
+
+```sql
+INSERT INTO users DEFAULT VALUES;
+```
+
+### UPSERT (ON CONFLICT DO UPDATE)
+
+SQLite's upsert follows the SQL standard `ON CONFLICT` clause added in SQLite 3.24.0.
+
+```sql
+INSERT INTO users (id, name, score)
+VALUES (1, 'Alice', 95.0)
+ON CONFLICT(id) DO UPDATE
+  SET name  = excluded.name,
+      score = excluded.score
+WHERE excluded.score > users.score;
+
+-- Silently ignore conflicts
+INSERT INTO users (id, name)
+VALUES (1, 'Alice')
+ON CONFLICT DO NOTHING;
+```
+
+<Tip>
+Inside the `DO UPDATE` clause, `excluded` is a pseudo-table referencing the row that would have been inserted.
+</Tip>
+
+---
+
+## UPDATE
+
+```sql
+UPDATE users
+SET    score = score + 5,
+       name  = UPPER(name)
+WHERE  id = 42;
+
+-- UPDATE with subquery
+UPDATE orders
+SET    status = 'vip'
+WHERE  user_id IN (SELECT id FROM users WHERE score > 90);
+```
+
+---
+
+## DELETE
+
+```sql
+DELETE FROM users WHERE score < 0;
+
+-- Delete all rows (fast path — no per-row callbacks)
+DELETE FROM users;
+```
+
+---
+
+## RETURNING Clause
+
+Both `INSERT`, `UPDATE`, and `DELETE` support a `RETURNING` clause (SQLite 3.35.0+):
+
+```sql
+INSERT INTO users (name, email)
+VALUES ('Dave', 'dave@example.com')
+RETURNING id, name;
+
+DELETE FROM users WHERE score < 0
+RETURNING id;
+```
+
+---
+
+## EXPLAIN and EXPLAIN QUERY PLAN
+
+<Accordion title="Understanding EXPLAIN">
+`EXPLAIN` emits the VDBE (Virtual DataBase Engine) byte-code sequence for a statement. This is low-level detail mostly useful for SQLite internals work.
+
+```sql
+EXPLAIN SELECT * FROM users WHERE id = 1;
+```
+</Accordion>
+
+<Accordion title="Understanding EXPLAIN QUERY PLAN">
+`EXPLAIN QUERY PLAN` provides a human-readable summary of how SQLite will execute a query — which indexes it will use, whether it will do a full table scan, and how joins are ordered.
+
+```sql
+EXPLAIN QUERY PLAN
+SELECT u.name, o.amount
+FROM   users u
+JOIN   orders o ON o.user_id = u.id
+WHERE  u.score > 50;
+```
+
+Sample output:
+```
+QUERY PLAN
+|--SCAN u
+`--SEARCH o USING INDEX idx_orders_user (user_id=?)
+```
+</Accordion>
+
+---
+
+## SQLite-Specific Extensions
+
+| Feature | Notes |
+|---|---|
+| `INTEGER PRIMARY KEY` | Alias for the internal `rowid` — O(1) lookup by integer key |
+| `WITHOUT ROWID` | B-tree keyed on declared `PRIMARY KEY`; eliminates secondary rowid B-tree |
+| `UPSERT` (`ON CONFLICT DO UPDATE`) | Standard upsert syntax, available since 3.24.0 |
+| `RETURNING` | Return data from mutating statements, available since 3.35.0 |
+| `WITH RECURSIVE` | Recursive CTEs for tree/graph traversal |
+| `INDEXED BY` | Hint to force use of a specific named index |
+| `NOT INDEXED` | Hint to suppress index usage for a table scan |
+
+```sql
+-- Force a specific index
+SELECT * FROM users INDEXED BY idx_users_email
+WHERE email = 'alice@example.com';
+```

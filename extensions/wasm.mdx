@@ -1,0 +1,290 @@
+---
+title: "SQLite in the Browser via WebAssembly (WASM)"
+sidebarTitle: "WASM"
+description: "Run SQLite in browsers and Node.js with the official WebAssembly build: npm install, in-memory and OPFS persistent databases, the OO1 API, and build requirements."
+---
+
+The SQLite WASM build compiles the entire SQLite C library to WebAssembly using the [Emscripten](https://emscripten.org) toolchain, making it possible to run a full-featured SQLite database engine directly in a web browser or in Node.js — with no native binaries, no server round-trips, and no plugins required. The WASM sources live in `ext/wasm/` and the official distribution is published to npm as `@sqlite.org/sqlite-wasm`.
+
+## Installation
+
+Install the official npm package:
+
+```bash
+npm install @sqlite.org/sqlite-wasm
+```
+
+The package ships pre-compiled `.wasm` binaries, so you do not need Emscripten to use it as an end user. Emscripten is only required if you are building from source.
+
+<Note>
+  The WASM build requires that your server (or bundler dev server) sends the
+  `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp` HTTP headers when serving the
+  page. These headers are required to enable `SharedArrayBuffer`, which the
+  OPFS helper workers depend on.
+</Note>
+
+## Basic Usage (Promise API)
+
+The simplest way to use the WASM build is via the Promise-based initialisation helper, which loads the `.wasm` binary and resolves with the `sqlite3` API object:
+
+```javascript
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+
+const sqlite3 = await sqlite3InitModule({
+  print:    console.log,
+  printErr: console.error,
+});
+
+console.log('SQLite version:', sqlite3.version.libVersion);
+```
+
+## The OO1 High-Level API
+
+`sqlite3.oo1.DB` provides a JavaScript-friendly object-oriented wrapper around the low-level C-style API. It is the recommended starting point for most applications.
+
+### In-Memory Database
+
+```javascript
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+
+const sqlite3 = await sqlite3InitModule();
+const db = new sqlite3.oo1.DB(':memory:', 'c'); // 'c' = create
+
+// Create a table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS employees (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    name  TEXT NOT NULL,
+    dept  TEXT,
+    salary REAL
+  )
+`);
+
+// Insert rows
+db.exec({
+  sql: 'INSERT INTO employees(name, dept, salary) VALUES (?, ?, ?)',
+  bind: ['Alice', 'Engineering', 120000],
+});
+db.exec({
+  sql: 'INSERT INTO employees(name, dept, salary) VALUES (?, ?, ?)',
+  bind: ['Bob', 'Design', 95000],
+});
+
+// Query with a row callback
+db.exec({
+  sql: 'SELECT id, name, salary FROM employees ORDER BY salary DESC',
+  callback: (row) => {
+    console.log(row);
+    // ['1', 'Alice', '120000']
+    // ['2', 'Bob',   '95000']
+  },
+  rowMode: 'array',
+});
+
+// Query and collect into an array
+const rows = [];
+db.exec({
+  sql:      'SELECT * FROM employees WHERE dept = ?',
+  bind:     ['Engineering'],
+  callback: (row) => rows.push(row),
+  rowMode:  'object', // each row is a plain JS object {id, name, dept, salary}
+});
+console.log(rows);
+
+db.close();
+```
+
+### Prepared Statements
+
+```javascript
+const stmt = db.prepare('SELECT name, salary FROM employees WHERE dept = ?');
+stmt.bind(['Engineering']);
+while (stmt.step()) {
+  console.log(stmt.get(0), stmt.get(1)); // name, salary
+}
+stmt.finalize();
+```
+
+## OPFS: Persistent In-Browser Storage
+
+An in-memory database is lost when the page is closed. For persistent storage inside the browser, the WASM build supports the **Origin Private File System** (OPFS) — a sandboxed file-system API available in modern browsers that gives each origin its own private storage area.
+
+<Warning>
+  OPFS support requires a browser with `FileSystemSyncAccessHandle` (Chrome 102+,
+  Firefox 111+, Safari 16.4+). The OPFS VFS runs in a Web Worker; your main
+  thread code communicates with it via `SharedArrayBuffer`, which requires the
+  cross-origin isolation headers mentioned above.
+</Warning>
+
+### Opening an OPFS Database
+
+```javascript
+import sqlite3InitModule from '@sqlite.org/sqlite-wasm';
+
+const sqlite3 = await sqlite3InitModule();
+
+let db;
+if ('opfs' in sqlite3) {
+  // Use OPFS for persistent storage
+  db = await sqlite3.oo1.OpfsDb('/myapp/data.db');
+  console.log('Using persistent OPFS storage');
+} else {
+  // Fall back to in-memory
+  db = new sqlite3.oo1.DB(':memory:', 'c');
+  console.warn('OPFS not available, using in-memory database');
+}
+
+db.exec('CREATE TABLE IF NOT EXISTS notes (id INTEGER PRIMARY KEY, text TEXT)');
+db.exec({
+  sql:  'INSERT INTO notes(text) VALUES (?)',
+  bind: ['Persistent note!'],
+});
+
+const count = db.selectValue('SELECT count(*) FROM notes');
+console.log('Note count:', count); // Persists across page reloads
+
+db.close();
+```
+
+<Tip>
+  The `OpfsDb` constructor returns a Promise. Await it before calling any
+  database methods. If you open the same OPFS file path twice (e.g., in two
+  tabs), only one will succeed — OPFS files are locked exclusively.
+</Tip>
+
+## Low-Level C-Style API
+
+For maximum control or when calling SQLite functions not yet wrapped by the OO1 API, you can use the low-level `sqlite3.capi` interface, which mirrors the C API directly. Pointers are represented as JavaScript numbers:
+
+```javascript
+const capi  = sqlite3.capi;
+const wasm  = sqlite3.wasm;
+
+// Allocate a pointer for the db handle
+const ppDb  = wasm.allocPtr();
+let rc = capi.sqlite3_open(':memory:', ppDb);
+const db    = wasm.peekPtr(ppDb);
+wasm.dealloc(ppDb);
+
+if (rc !== capi.SQLITE_OK) throw new Error('Failed to open DB');
+
+// Prepare a statement
+const ppStmt = wasm.allocPtr();
+const sql    = 'SELECT sqlite_version()';
+rc = capi.sqlite3_prepare_v2(db, sql, -1, ppStmt, null);
+const stmt   = wasm.peekPtr(ppStmt);
+wasm.dealloc(ppStmt);
+
+if (capi.sqlite3_step(stmt) === capi.SQLITE_ROW) {
+  const version = capi.sqlite3_column_text(stmt, 0);
+  console.log('Version:', version);
+}
+
+capi.sqlite3_finalize(stmt);
+capi.sqlite3_close_v2(db);
+```
+
+<Note>
+  The low-level API uses `wasm.allocPtr()` / `wasm.dealloc()` for manual memory
+  management. Prefer the OO1 API unless you specifically need direct C-API
+  access.
+</Note>
+
+## Using in Node.js
+
+The same `@sqlite.org/sqlite-wasm` package works in Node.js (v18.11+ recommended for WASM support):
+
+```javascript
+// CommonJS
+const sqlite3InitModule = require('@sqlite.org/sqlite-wasm').default;
+
+(async () => {
+  const sqlite3 = await sqlite3InitModule();
+  const db = new sqlite3.oo1.DB(':memory:');
+
+  db.exec('CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT)');
+  db.exec({ sql: 'INSERT INTO kv VALUES (?,?)', bind: ['hello', 'world'] });
+
+  const val = db.selectValue('SELECT value FROM kv WHERE key = ?', ['hello']);
+  console.log(val); // 'world'
+
+  db.close();
+})();
+```
+
+<Note>
+  OPFS is a browser-only API and is not available in Node.js. For persistent
+  storage in Node.js, use a standard file path with the normal WASM VFS, or
+  consider the native `better-sqlite3` package instead.
+</Note>
+
+## Build Requirements (Source Builds)
+
+If you need to build the WASM artifacts from the SQLite source tree yourself, you need the following tools:
+
+<Steps>
+  <Step title="Install the Emscripten SDK">
+    ```bash
+    git clone https://github.com/emscripten-core/emsdk.git
+    cd emsdk
+    ./emsdk install latest
+    ./emsdk activate latest
+    source ./emsdk_env.sh
+    ```
+  </Step>
+  <Step title="Install wabt (for release builds)">
+    Release builds require `wasm-strip` from the [WebAssembly Binary Toolkit](https://github.com/WebAssembly/wabt) (version 1.36.0 or higher) to strip debug sections and reduce the `.wasm` file size. Download a pre-built binary from the [wabt releases page](https://github.com/WebAssembly/wabt/releases).
+  </Step>
+  <Step title="Configure and build">
+    ```bash
+    # From the SQLite source root
+    ./configure --with-emsdk=/path/to/emsdk
+
+    # Build the WASM target
+    make fiddle
+    # or:
+    cd ext/wasm && make
+    ```
+  </Step>
+  <Step title="Serve locally (WASM cannot load from file://)">
+    WASM content cannot be loaded from a `file://` URL due to browser security
+    restrictions. Use a local HTTP server:
+
+    ```bash
+    cd ext/wasm
+    make httpd   # Uses althttpd with --enable-sab for SharedArrayBuffer
+    ```
+
+    The server must emit `Cross-Origin-Opener-Policy: same-origin` and
+    `Cross-Origin-Embedder-Policy: require-corp` headers for OPFS features to work.
+  </Step>
+</Steps>
+
+## Key Limitations vs. the Native C Build
+
+| Feature | Native C | WASM |
+|---|---|---|
+| File I/O | Full OS filesystem | In-memory or OPFS only |
+| Persistent storage | Any path | OPFS (browser) or memory (Node.js) |
+| Extension loading | `sqlite3_load_extension()` | Not available |
+| Multi-threading | WAL with concurrent readers | Limited; main thread + workers |
+| Performance | Native speed | Approximately 1.5–3× slower |
+| Deployment | Binary per platform | Single `.wasm` file, runs anywhere |
+| VFS customisation | Full VFS API | Limited to provided VFS backends |
+
+<Accordion title="About SharedArrayBuffer and COOP/COEP headers">
+  The OPFS worker-based VFS communicates between the main thread and a Web
+  Worker using `SharedArrayBuffer` and `Atomics`. These APIs require that the
+  page is served with `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`. If your server or CDN cannot
+  add these headers, OPFS will not be available and you must fall back to
+  in-memory storage.
+</Accordion>
+
+## Further Resources
+
+- Official demo and test suite: [sqlite.org/wasm](https://sqlite.org/wasm)
+- npm package: [`@sqlite.org/sqlite-wasm`](https://www.npmjs.com/package/@sqlite.org/sqlite-wasm)
+- Emscripten documentation: [emscripten.org](https://emscripten.org)
+- OPFS on MDN: [Origin Private File System](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system)
